@@ -25,6 +25,20 @@ SERVICE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
 PRIMARY_KEY = SERVICE_KEY if SERVICE_KEY else ANON_KEY
 
+# --- PROXY POOL SETUP ---
+PROXY_LIST_RAW = os.getenv("PROXY_LIST", "")
+proxy_pool = []
+if PROXY_LIST_RAW:
+    for p_str in PROXY_LIST_RAW.split(","):
+        parts = p_str.strip().split(":")
+        if len(parts) == 4:
+            proxy_pool.append({
+                "server": f"http://{parts[0]}:{parts[1]}",
+                "username": parts[2],
+                "password": parts[3]
+            })
+current_proxy_index = 0
+
 # --- FLASK DASHBOARD SETUP ---
 app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
@@ -212,51 +226,98 @@ async def detect_queue(page, network_signals):
     is_active = len(fired) >= 2
     return is_active, confidence, signals
 
+async def detect_block(page):
+    content = await page.content()
+    block_keywords = [
+        "access is temporarily restricted",
+        "unusual activity from your device or network",
+        "error 15",
+        "incident id:",
+        "powered by imperva"
+    ]
+    if any(word in content.lower() for word in block_keywords):
+        return True
+    return False
+
 async def monitor_loop():
+    global current_proxy_index
     log_to_dashboard("Elite Monitor Engine Starting...", "info")
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            viewport={'width': 1280, 'height': 720},
-            extra_http_headers={
-                "Accept-Language": "en-US,en;q=0.9",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-                "Sec-Ch-Ua": '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
-                "Sec-Ch-Ua-Mobile": "?0", "Sec-Ch-Ua-Platform": '"Windows"'
-            }
-        )
         while True:
-            try:
-                page = await context.new_page()
-                await stealth_async(page)
-                network_signals = {'queue_it_detected': False}
-                page.on("request", lambda r: network_signals.update({'queue_it_detected': True}) if "queue-it.net" in r.url else None)
+            launch_args = {"headless": True}
+            
+            if proxy_pool:
+                current_proxy = proxy_pool[current_proxy_index]
+                launch_args["proxy"] = current_proxy
+                ip_display = current_proxy['server'].split('//')[1].split(':')[0]
+                log_to_dashboard(f"🛡️ Using Proxy Pool IP: {ip_display}", "info")
+            elif os.getenv("PROXY_SERVER"):
+                launch_args["proxy"] = {
+                    "server": os.getenv("PROXY_SERVER"),
+                    "username": os.getenv("PROXY_USERNAME", ""),
+                    "password": os.getenv("PROXY_PASSWORD", "")
+                }
+                log_to_dashboard("🛡️ Single Proxy Configured.", "info")
                 
-                log_to_dashboard("Checking Pokémon Center...")
-                await page.goto(PC_URL, wait_until="domcontentloaded", timeout=60000)
-                await asyncio.sleep(3)
-                
-                # Take Screenshot for Dashboard
-                screenshot = await page.screenshot(type='jpeg', quality=50)
-                base64_screenshot = base64.b64encode(screenshot).decode('utf-8')
-                socketio.emit('screenshot', base64_screenshot)
-                
-                is_queue, confidence, signals = await detect_queue(page, network_signals)
-                new_state = "QUEUE_ACTIVE" if is_queue else "NORMAL"
-                
-                await update_supabase_state(new_state, confidence, signals)
-                monitor_stats["checks"] += 1
-                socketio.emit('stats_update', monitor_stats)
-                
-                log_to_dashboard(f"Check Complete. Result: {new_state} ({confidence*100}%)", "success" if not is_queue else "error")
-                await page.close()
-                
-            except Exception as e:
-                log_to_dashboard(f"Monitor Loop Error: {e}", "error")
+            browser = await p.chromium.launch(**launch_args)
+            context = await browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                viewport={'width': 1280, 'height': 720},
+                extra_http_headers={
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                    "Sec-Ch-Ua": '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
+                    "Sec-Ch-Ua-Mobile": "?0", "Sec-Ch-Ua-Platform": '"Windows"'
+                }
+            )
+            
+            while True:
+                try:
+                    page = await context.new_page()
+                    await stealth_async(page)
+                    network_signals = {'queue_it_detected': False}
+                    page.on("request", lambda r: network_signals.update({'queue_it_detected': True}) if "queue-it.net" in r.url else None)
+                    
+                    log_to_dashboard("Checking Pokémon Center...")
+                    await page.goto(PC_URL, wait_until="domcontentloaded", timeout=60000)
+                    await asyncio.sleep(3)
+                    
+                    # Take Screenshot for Dashboard
+                    screenshot = await page.screenshot(type='jpeg', quality=50)
+                    base64_screenshot = base64.b64encode(screenshot).decode('utf-8')
+                    socketio.emit('screenshot', base64_screenshot)
+                    
+                    is_blocked = await detect_block(page)
+                    
+                    if is_blocked:
+                        log_to_dashboard("⚠️ IP BLOCKED BY IMPERVA (Access Restricted)", "error")
+                        log_to_dashboard("🔄 Rotating to next proxy in pool...", "info")
+                        if proxy_pool:
+                            current_proxy_index = (current_proxy_index + 1) % len(proxy_pool)
+                        await page.close()
+                        await browser.close()
+                        break # Break inner loop, launch new browser with new proxy
+                    else:
+                        is_queue, confidence, signals = await detect_queue(page, network_signals)
+                        new_state = "QUEUE_ACTIVE" if is_queue else "NORMAL"
+                        await update_supabase_state(new_state, confidence, signals)
+                        monitor_stats["state"] = new_state
+                        log_to_dashboard(f"Check Complete. Result: {new_state} ({confidence*100}%)", "success" if not is_queue else "error")
+                    
+                    monitor_stats["checks"] += 1
+                    socketio.emit('stats_update', monitor_stats)
+                    
+                    await page.close()
+                    
+                except Exception as e:
+                    log_to_dashboard(f"Monitor Loop Error: {e}", "error")
+                    if proxy_pool:
+                        current_proxy_index = (current_proxy_index + 1) % len(proxy_pool)
+                    await browser.close()
+                    break # Break inner loop on crash to reset browser
 
-            sleep_time = random.uniform(POLL_INTERVAL_MIN, POLL_INTERVAL_MAX)
-            await asyncio.sleep(sleep_time)
+                sleep_time = random.uniform(POLL_INTERVAL_MIN, POLL_INTERVAL_MAX)
+                await asyncio.sleep(sleep_time)
 
 def run_monitor():
     loop = asyncio.new_event_loop()
