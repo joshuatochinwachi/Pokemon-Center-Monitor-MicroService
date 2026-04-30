@@ -27,7 +27,7 @@ PRIMARY_KEY = SERVICE_KEY if SERVICE_KEY else ANON_KEY
 
 # --- FLASK DASHBOARD SETUP ---
 app = Flask(__name__)
-socketio = SocketIO(app, cors_allowed_origins="*")
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
