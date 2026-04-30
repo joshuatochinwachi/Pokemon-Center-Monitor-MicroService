@@ -228,12 +228,25 @@ async def detect_queue(page, network_signals):
 
 async def detect_block(page):
     content = await page.content()
+    
+    # Imperva often puts the CAPTCHA inside an iframe. We must scan all frames.
+    for frame in page.frames:
+        try:
+            frame_content = await frame.content()
+            content += " " + frame_content
+        except:
+            pass
+            
     block_keywords = [
         "access is temporarily restricted",
-        "unusual activity from your device or network",
+        "unusual activity from your device",
         "error 15",
-        "incident id:",
-        "powered by imperva"
+        "incident id",
+        "powered by imperva",
+        "verifying the device",
+        "verification required",
+        "slide right to secure your access",
+        "we detected unusual activity"
     ]
     if any(word in content.lower() for word in block_keywords):
         return True
