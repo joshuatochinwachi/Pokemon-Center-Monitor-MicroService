@@ -204,8 +204,7 @@ async def fire_push_notifications(state):
                 "body": "The Queue is LIVE! • Join the line now! 🏃‍♂️💨",
                 "data": {
                     "type": "pc_monitor", 
-                    "state": state,
-                    "image": "https://www.pokemoncenter.com/static/images/pokemon-center-logo.png"
+                    "state": state
                 },
                 "sound": "default",
                 "priority": "high",
