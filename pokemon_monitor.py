@@ -520,10 +520,27 @@ async def monitor_loop():
                         break # Break inner loop, launch new browser with new proxy
                     else:
                         is_queue, confidence, signals = await detect_queue(page, network_signals)
+                        
+                        # --- DOUBLE-TAP VERIFICATION (NO FALSE ALARMS) ---
+                        if is_queue and confidence < 1.0:
+                            log_to_dashboard("🔍 Heuristic Trigger. Double-checking in 5s...", "info")
+                            await asyncio.sleep(5)
+                            is_queue, confidence, signals = await detect_queue(page, network_signals)
+                            if not is_queue:
+                                log_to_dashboard("🛡️ False Alarm Prevented by Double-Tap Verification.", "success")
+                        
+                        # --- PERSISTENCE CHECK (NEVER MISS A QUEUE) ---
+                        # If we see even a tiny hint (confidence > 0) but it didn't trigger 'is_queue',
+                        # we do one more quick check to ensure the page wasn't just slow-loading.
+                        if not is_queue and confidence > 0:
+                            log_to_dashboard("📡 Minor signal detected. Performing Deep-Scan retry...", "info")
+                            await asyncio.sleep(3)
+                            is_queue, confidence, signals = await detect_queue(page, network_signals)
+                        
                         new_state = "QUEUE_ACTIVE" if is_queue else "NORMAL"
                         await update_supabase_state(new_state, confidence, signals)
                         monitor_stats["state"] = new_state
-                        log_to_dashboard(f"Check Complete. Result: {new_state} ({confidence*100}%)", "success" if not is_queue else "error")
+                        log_to_dashboard(f"Check Complete. Result: {new_state} ({int(confidence*100)}%)", "success" if not is_queue else "error")
                     
                         monitor_stats["checks"] += 1
                         socketio.emit('stats_update', monitor_stats)
