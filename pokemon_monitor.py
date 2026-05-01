@@ -420,13 +420,13 @@ def get_realistic_user_agent():
     """Return a consistent set of matching user-agent and platform headers"""
     profiles = [
         {
-            "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            "ch_ua": '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
+            "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "ch_ua": '"Chromium";v="124", "Not(A:Brand";v="24", "Google Chrome";v="124"',
             "platform": '"Windows"'
         },
         {
-            "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            "ch_ua": '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
+            "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "ch_ua": '"Chromium";v="124", "Not(A:Brand";v="24", "Google Chrome";v="124"',
             "platform": '"macOS"'
         }
     ]
@@ -497,6 +497,10 @@ async def monitor_loop():
                     
                     log_to_dashboard("Checking Pokémon Center...")
                     await page.goto(PC_URL, wait_until="domcontentloaded", timeout=60000)
+                    
+                    # Stealth Patience: Allow Imperva JS challenges to resolve
+                    log_to_dashboard("⏳ Solving Stealth Challenges...", "info")
+                    await asyncio.sleep(random.uniform(3.0, 5.0))
                     
                     # Simulate human behavior to defeat behavioral tracking
                     await simulate_human_behavior(page)
