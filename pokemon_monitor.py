@@ -508,8 +508,33 @@ async def monitor_loop():
                     await stealth_async(page)
                     network_signals = {'queue_it_detected': False}
                     page.on("request", lambda r: network_signals.update({'queue_it_detected': True}) if "queue-it.net" in r.url else None)
-                    
-                    log_to_dashboard("Checking Pokémon Center...")
+
+                    # ⚡ BANDWIDTH SAVER: Block heavy resources (saves up to 80% bandwidth)
+                    # CRITICAL: Always allow queue-it.net through for accurate detection
+                    BLOCKED_DOMAINS = [
+                        "google-analytics.com", "googletagmanager.com", "doubleclick.net",
+                        "facebook.com", "hotjar.com", "newrelic.com", "quantserve.com",
+                        "scorecardresearch.com", "amazon-adsystem.com", "adnxs.com",
+                        "criteo.com", "segment.com", "mixpanel.com", "amplitude.com"
+                    ]
+                    async def block_heavy_resources(route, request):
+                        url = request.url.lower()
+                        # ALWAYS let queue-it.net through — needed for detection
+                        if "queue-it.net" in url:
+                            await route.continue_()
+                            return
+                        # Block heavy resource types
+                        if request.resource_type in ["image", "stylesheet", "font", "media"]:
+                            await route.abort()
+                            return
+                        # Block analytics & ad trackers
+                        if any(domain in url for domain in BLOCKED_DOMAINS):
+                            await route.abort()
+                            return
+                        await route.continue_()
+                    await page.route("**/*", block_heavy_resources)
+
+                    log_to_dashboard("⚡ Bandwidth Saver Active. Checking Pokémon Center...")
                     await page.goto(PC_URL, wait_until="domcontentloaded", timeout=60000)
                     
                     # Stealth Patience: Allow Imperva JS challenges to resolve
