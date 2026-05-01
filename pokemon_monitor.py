@@ -333,22 +333,20 @@ async def realistic_scroll_behavior(page):
         pass
 
 def get_realistic_user_agent():
-    """Return weighted realistic user agents"""
-    agents_weighted = [
-        ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36", 40),
-        ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36", 20),
-        ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36", 20),
-        ("Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0", 10),
-        ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 Edg/122.0.0.0", 10),
+    """Return a consistent set of matching user-agent and platform headers"""
+    profiles = [
+        {
+            "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "ch_ua": '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
+            "platform": '"Windows"'
+        },
+        {
+            "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "ch_ua": '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
+            "platform": '"macOS"'
+        }
     ]
-    total = sum(weight for _, weight in agents_weighted)
-    r = random.uniform(0, total)
-    upto = 0
-    for agent, weight in agents_weighted:
-        if upto + weight >= r:
-            return agent
-        upto += weight
-    return agents_weighted[0][0]
+    return random.choice(profiles)
 
 async def simulate_human_behavior(page):
     """Orchestrates elite human behavior."""
@@ -366,7 +364,16 @@ async def monitor_loop():
     log_to_dashboard("Elite Monitor Engine Starting...", "info")
     async with async_playwright() as p:
         while True:
-            launch_args = {"headless": True}
+            launch_args = {
+                "headless": True,
+                "args": [
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-infobars",
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--ignore-certificate-errors",
+                ]
+            }
             
             if proxy_pool:
                 current_proxy = proxy_pool[current_proxy_index]
@@ -382,14 +389,18 @@ async def monitor_loop():
                 log_to_dashboard("🛡️ Single Proxy Configured.", "info")
                 
             browser = await p.chromium.launch(**launch_args)
+            
+            profile = get_realistic_user_agent()
             context = await browser.new_context(
-                user_agent=get_realistic_user_agent(),
+                user_agent=profile["ua"],
                 viewport={'width': random.randint(1280, 1920), 'height': random.randint(800, 1080)},
                 extra_http_headers={
                     "Accept-Language": "en-US,en;q=0.9",
                     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-                    "Sec-Ch-Ua": '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
-                    "Sec-Ch-Ua-Mobile": "?0", "Sec-Ch-Ua-Platform": '"Windows"'
+                    "Sec-Ch-Ua": profile["ch_ua"],
+                    "Sec-Ch-Ua-Mobile": "?0", 
+                    "Sec-Ch-Ua-Platform": profile["platform"],
+                    "Upgrade-Insecure-Requests": "1"
                 }
             )
             
@@ -415,6 +426,8 @@ async def monitor_loop():
                     
                     if is_blocked:
                         log_to_dashboard("⚠️ IP BLOCKED BY IMPERVA (Access Restricted)", "error")
+                        log_to_dashboard("⏳ Applying 15s penalty cooldown for Webshare proxy to rotate properly...", "info")
+                        await asyncio.sleep(15)  # Penalty delay to prevent spamming and allow Webshare rotation
                         log_to_dashboard("🔄 Rotating to next proxy in pool...", "info")
                         if proxy_pool:
                             current_proxy_index = (current_proxy_index + 1) % len(proxy_pool)
