@@ -505,6 +505,12 @@ async def monitor_loop():
                     # Simulate human behavior to defeat behavioral tracking
                     await simulate_human_behavior(page)
                     
+                    # Smart-Eye: Wait for actual content before screenshotting (Logo or Header)
+                    try:
+                        await page.wait_for_selector("header, .main-content, #main-content", timeout=10000)
+                    except:
+                        pass # Site might be in a different state or blocked, capture anyway
+                    
                     # Take Screenshot for Dashboard
                     screenshot = await page.screenshot(type='jpeg', quality=50)
                     base64_screenshot = base64.b64encode(screenshot).decode('utf-8')
