@@ -155,24 +155,59 @@ def get_headers(key=None):
 
 async def fire_push_notifications(state):
     try:
+        now_iso = datetime.now(timezone.utc).isoformat()
         async with httpx.AsyncClient() as client:
+            # VETERAN FIX: Pull push_tokens directly from users table via relational inner join
+            # This ensures we use the real tokens saved during app login/signup
             resp = await client.get(
-                f"{SUPABASE_URL}/rest/v1/pc_monitor_subscribers?is_active=eq.true&select=fcm_token",
+                f"{SUPABASE_URL}/rest/v1/pc_monitor_subscribers?is_active=eq.true&select=users!inner(subscription_status,subscription_end,push_tokens)",
                 headers=get_headers()
             )
-            data = resp.json() if resp.status_code == 200 else []
-            tokens = [r['fcm_token'] for r in data if 'fcm_token' in r]
-            if not tokens: return
+            
+            if resp.status_code != 200:
+                log_to_dashboard(f"Push Query Failed: {resp.status_code}", "error")
+                return
+                
+            data = resp.json()
+            valid_tokens = []
+            
+            for row in data:
+                user = row.get("users")
+                if not user: continue
+                
+                # Verify Premium Gating (Status & Expiry)
+                is_active = user.get("subscription_status") == "active"
+                sub_end = user.get("subscription_end")
+                user_tokens = user.get("push_tokens") or [] # This is an array
+                
+                is_expired = False
+                if sub_end:
+                    try:
+                        end_dt = datetime.fromisoformat(sub_end.replace('Z', '+00:00'))
+                        if end_dt < datetime.now(timezone.utc):
+                            is_expired = True
+                    except:
+                        pass
+                
+                if is_active and not is_expired and isinstance(user_tokens, list):
+                    for token in user_tokens:
+                        if token and token.startswith("ExponentPushToken"):
+                            valid_tokens.append(token)
+            
+            if not valid_tokens:
+                log_to_dashboard("No active premium subscribers found with valid tokens.", "info")
+                return
+                
             push_payload = [{
                 "to": t,
                 "title": "🚨 POKEMON CENTER QUEUE LIVE!",
                 "body": "The waiting room is active. Join the line now!",
                 "data": {"type": "pc_monitor", "state": state},
                 "sound": "default", "priority": "high"
-            } for t in tokens if t.startswith("ExponentPushToken")]
-            if push_payload:
-                await client.post("https://exp.host/--/api/v2/push/send", json=push_payload)
-                log_to_dashboard(f"Alerts fired to {len(push_payload)} users", "success")
+            } for t in valid_tokens]
+            
+            await client.post("https://exp.host/--/api/v2/push/send", json=push_payload)
+            log_to_dashboard(f"Alerts fired to {len(push_payload)} premium users", "success")
     except Exception as e:
         log_to_dashboard(f"Push Error: {e}", "error")
 
@@ -204,25 +239,56 @@ async def update_supabase_state(state, confidence=1.0, details=None):
 async def detect_queue(page, network_signals):
     signals = {
         "network_traffic": network_signals['queue_it_detected'],
-        "dom_heuristics": False, "cookie_fingerprint": False,
-        "url_redirect": False, "text_keywords": False
+        "dom_heuristics": False, 
+        "cookie_fingerprint": False,
+        "url_redirect": False, 
+        "text_keywords": False,
+        "timer_detected": False
     }
+    
     if "queue-it.net" in page.url or "waitingroom" in page.url:
         signals["url_redirect"] = True
+        
     content = await page.content()
-    if 'queue-it.js' in content or 'queueit' in content.lower() or 'Challenge_Banner' in content:
+    content_lower = content.lower()
+    
+    if 'queue-it.js' in content or 'queueit' in content_lower or 'Challenge_Banner' in content:
         signals["dom_heuristics"] = True
-    queue_keywords = ["hi, trainer!", "virtual queue", "now in line", "approximate wait", "estimated wait", "queue is full", "do not refresh", "stay in the queue", "lose your place", "high volume of requests", "redirected to the site", "guarantee product availability", "sell out", "become unavailable", "waiting in line", "trainer", "line is paused", "queue-it", "queueit", "waiting room"]
-    if any(word in content.lower() for word in queue_keywords):
+        
+    # Expanded Keyword List from the user's provided queue image
+    queue_keywords = [
+        "hi, trainer!", "virtual queue", "now in line", "approximate wait", 
+        "estimated wait", "queue is full", "do not refresh", "stay in the queue", 
+        "lose your place", "high volume of requests", "redirected to the site", 
+        "guarantee product availability", "sell out", "become unavailable", 
+        "waiting in line", "line is paused", "queue-it", "queueit", "waiting room",
+        "pokemon", "window", "virtual", "trainer", "wait", "estimated", "time", "open"
+    ]
+    
+    if any(word in content_lower for word in queue_keywords):
         signals["text_keywords"] = True
+        
+    # Dedicated Hyper-Intelligent Timer Sensor
+    # Pattern 1: Standard Digital (02:30:00 or 15:45)
+    # Pattern 2: Text-based (5 minutes, 1 hour, 30 secs)
+    # Pattern 3: Hybrid (00h 05m 10s)
     import re
-    if re.search(r'\d{1,2}:\d{2}:\d{2}', content):
-        signals["text_keywords"] = True
+    time_patterns = [
+        r'\b\d{1,2}:\d{2}(:\d{2})?\b', 
+        r'\d+\s*(?:hr|min|sec|hour|minute|second)s?\b',
+        r'\d+h\s*\d+m\s*\d+s'
+    ]
+    
+    if any(re.search(p, content_lower) for p in time_patterns):
+        signals["timer_detected"] = True
+        
     cookies = await page.context.cookies()
     if any("QueueIT" in c['name'] for c in cookies):
         signals["cookie_fingerprint"] = True
+        
     fired = [k for k, v in signals.items() if v]
-    confidence = len(fired) / 5.0
+    # Now using 6 total sensors for higher precision
+    confidence = len(fired) / 6.0
     is_active = len(fired) >= 2
     return is_active, confidence, signals
 
@@ -441,10 +507,21 @@ async def monitor_loop():
                         monitor_stats["state"] = new_state
                         log_to_dashboard(f"Check Complete. Result: {new_state} ({confidence*100}%)", "success" if not is_queue else "error")
                     
-                    monitor_stats["checks"] += 1
-                    socketio.emit('stats_update', monitor_stats)
-                    
-                    await page.close()
+                        monitor_stats["checks"] += 1
+                        socketio.emit('stats_update', monitor_stats)
+                        
+                        await page.close()
+                        
+                        # Sleep before next check
+                        sleep_time = random.uniform(POLL_INTERVAL_MIN, POLL_INTERVAL_MAX)
+                        log_to_dashboard(f"💤 Sleeping for {int(sleep_time/60)} minutes before next check...", "info")
+                        await asyncio.sleep(sleep_time)
+                        
+                        # Force complete session isolation: destroy browser and rotate country gateway
+                        if proxy_pool:
+                            current_proxy_index = (current_proxy_index + 1) % len(proxy_pool)
+                        await browser.close()
+                        break # Break inner loop, launch entirely new browser for next check
                     
                 except Exception as e:
                     log_to_dashboard(f"Monitor Loop Error: {e}", "error")
@@ -452,9 +529,6 @@ async def monitor_loop():
                         current_proxy_index = (current_proxy_index + 1) % len(proxy_pool)
                     await browser.close()
                     break # Break inner loop on crash to reset browser
-
-                sleep_time = random.uniform(POLL_INTERVAL_MIN, POLL_INTERVAL_MAX)
-                await asyncio.sleep(sleep_time)
 
 def run_monitor():
     loop = asyncio.new_event_loop()
