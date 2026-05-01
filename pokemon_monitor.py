@@ -178,7 +178,7 @@ async def fire_push_notifications(state):
                 # Verify Premium Gating (Status & Expiry)
                 is_active = user.get("subscription_status") == "active"
                 sub_end = user.get("subscription_end")
-                user_tokens = user.get("push_tokens") or [] # This is an array
+                user_tokens = user.get("push_tokens") or [] 
                 
                 is_expired = False
                 if sub_end:
@@ -255,14 +255,13 @@ async def detect_queue(page, network_signals):
     if 'queue-it.js' in content or 'queueit' in content_lower or 'Challenge_Banner' in content:
         signals["dom_heuristics"] = True
         
-    # Expanded Keyword List from the user's provided queue image
+    # Strictly high-intent queue phrases only
     queue_keywords = [
         "hi, trainer!", "virtual queue", "now in line", "approximate wait", 
-        "estimated wait", "queue is full", "do not refresh", "stay in the queue", 
+        "estimated wait time", "queue is full", "do not refresh", "stay in the queue", 
         "lose your place", "high volume of requests", "redirected to the site", 
         "guarantee product availability", "sell out", "become unavailable", 
-        "waiting in line", "line is paused", "queue-it", "queueit", "waiting room",
-        "pokemon", "window", "virtual", "trainer", "wait", "estimated", "time", "open"
+        "waiting in line", "line is paused", "queue-it", "waiting room"
     ]
     
     if any(word in content_lower for word in queue_keywords):
@@ -286,10 +285,29 @@ async def detect_queue(page, network_signals):
     if any("QueueIT" in c['name'] for c in cookies):
         signals["cookie_fingerprint"] = True
         
-    fired = [k for k, v in signals.items() if v]
-    # Now using 6 total sensors for higher precision
-    confidence = len(fired) / 6.0
-    is_active = len(fired) >= 2
+    # Elite Weighted Scoring Engine (6-Sensor Fusion)
+    weights = {
+        "network_traffic": 100,
+        "url_redirect": 100,
+        "dom_heuristics": 80,
+        "cookie_fingerprint": 60,
+        "text_keywords": 40,
+        "timer_detected": 40
+    }
+    
+    # CRITICAL OVERRIDE: Network or URL redirect is a 100% lock
+    if signals["network_traffic"] or signals["url_redirect"]:
+        confidence = 1.0
+        is_active = True
+        log_to_dashboard("🎯 CRITICAL SENSOR FIRE: Instant 100% Confidence.", "success")
+    else:
+        # COMBINED SUPPORT HEURISTICS
+        total_possible = sum(weights.values())
+        current_score = sum(weights[k] for k, v in signals.items() if v)
+        confidence = current_score / total_possible
+        # THRESHOLD: Require >= 50% (at least 3 sensors) for support triggers
+        is_active = confidence >= 0.50
+        
     return is_active, confidence, signals
 
 async def detect_block(page):
