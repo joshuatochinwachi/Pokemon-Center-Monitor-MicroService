@@ -200,13 +200,28 @@ async def fire_push_notifications(state):
                 
             push_payload = [{
                 "to": t,
-                "title": "🚨 POKEMON CENTER QUEUE LIVE!",
-                "body": "The waiting room is active. Join the line now!",
-                "data": {"type": "pc_monitor", "state": state},
-                "sound": "default", "priority": "high"
+                "title": "🚨 Pokémon Center Monitor",
+                "body": "The Queue is LIVE! • Join the line now! 🏃‍♂️💨",
+                "data": {
+                    "type": "pc_monitor", 
+                    "state": state,
+                    "image": "https://www.pokemoncenter.com/static/images/pokemon-center-logo.png"
+                },
+                "sound": "default",
+                "priority": "high",
+                "badge": 1,
+                "channelId": "default",
+                "ttl": 2419200
             } for t in valid_tokens]
             
-            await client.post("https://exp.host/--/api/v2/push/send", json=push_payload)
+            await client.post(
+                "https://exp.host/--/api/v2/push/send",
+                headers={
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                },
+                json=push_payload
+            )
             log_to_dashboard(f"Alerts fired to {len(push_payload)} premium users", "success")
     except Exception as e:
         log_to_dashboard(f"Push Error: {e}", "error")
