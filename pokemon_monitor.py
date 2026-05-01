@@ -16,8 +16,8 @@ load_dotenv()
 
 # --- CONFIG ---
 PC_URL = "https://www.pokemoncenter.com"
-POLL_INTERVAL_MIN = 25
-POLL_INTERVAL_MAX = 45
+POLL_INTERVAL_MIN = 1800
+POLL_INTERVAL_MAX = 3600
 
 # --- SMART KEY SELECTOR ---
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -237,6 +237,8 @@ async def detect_block(page):
         except:
             pass
             
+    content_lower = content.lower()
+            
     block_keywords = [
         "access is temporarily restricted",
         "unusual activity from your device",
@@ -246,11 +248,118 @@ async def detect_block(page):
         "verifying the device",
         "verification required",
         "slide right to secure your access",
-        "we detected unusual activity"
+        "we detected unusual activity",
+        "additional security check is required",
+        "i am human"
     ]
-    if any(word in content.lower() for word in block_keywords):
+    
+    if any(word in content_lower for word in block_keywords):
         return True
+        
+    # Failsafe: If the page is a blank white screen or a completely unknown error
+    # it won't even mention "pokemon" or the "queue". Treat as blocked/failed.
+    if "pokemon" not in content_lower and "queue" not in content_lower:
+        return True
+        
     return False
+
+async def smart_delay(base_min, base_max, variance=0.3):
+    """Intelligent delay with Gaussian distribution for more natural randomness"""
+    mid = (base_min + base_max) / 2
+    sigma = (base_max - base_min) * variance
+    delay = random.gauss(mid, sigma)
+    delay = max(base_min, min(base_max, delay))
+    await asyncio.sleep(delay)
+
+async def advanced_mouse_movement(page):
+    """Ultra-realistic mouse movement with curves and acceleration"""
+    try:
+        viewport = page.viewport_size
+        if not viewport:
+            return
+            
+        start_x = random.randint(50, viewport['width'] - 50)
+        start_y = random.randint(50, viewport['height'] - 50)
+        num_moves = random.randint(2, 4)
+        
+        for _ in range(num_moves):
+            target_x = random.randint(100, viewport['width'] - 100)
+            target_y = random.randint(100, viewport['height'] - 100)
+            
+            distance = ((target_x - start_x)**2 + (target_y - start_y)**2)**0.5
+            steps = max(5, int(distance / 50))
+            
+            for i in range(steps):
+                t = i / steps
+                noise_x = random.uniform(-10, 10)
+                noise_y = random.uniform(-10, 10)
+                
+                current_x = start_x + (target_x - start_x) * t + noise_x
+                current_y = start_y + (target_y - start_y) * t + noise_y
+                
+                await page.mouse.move(current_x, current_y)
+                speed_factor = 1 - abs(t - 0.5) * 0.5
+                if speed_factor <= 0: speed_factor = 0.1
+                await asyncio.sleep(0.01 / speed_factor)
+            
+            start_x, start_y = target_x, target_y
+            await smart_delay(0.2, 0.5)
+    except Exception:
+        pass
+
+async def realistic_scroll_behavior(page):
+    """Advanced scrolling with momentum and natural deceleration"""
+    try:
+        num_scrolls = random.randint(2, 4)
+        for _ in range(num_scrolls):
+            scroll_down = random.random() < 0.7
+            if scroll_down:
+                base_scroll = random.randint(150, 500)
+            else:
+                base_scroll = -random.randint(100, 300)
+            
+            momentum_steps = random.randint(3, 7)
+            for step in range(momentum_steps):
+                step_scroll = base_scroll * (1 - step / momentum_steps) / momentum_steps
+                await page.mouse.wheel(0, step_scroll)
+                await asyncio.sleep(random.uniform(0.02, 0.06))
+            
+            await smart_delay(0.4, 1.0)
+            
+            if random.random() < 0.25:
+                await page.mouse.wheel(0, random.randint(-100, -50))
+                await smart_delay(0.3, 0.7)
+    except Exception:
+        pass
+
+def get_realistic_user_agent():
+    """Return weighted realistic user agents"""
+    agents_weighted = [
+        ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36", 40),
+        ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36", 20),
+        ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36", 20),
+        ("Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0", 10),
+        ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 Edg/122.0.0.0", 10),
+    ]
+    total = sum(weight for _, weight in agents_weighted)
+    r = random.uniform(0, total)
+    upto = 0
+    for agent, weight in agents_weighted:
+        if upto + weight >= r:
+            return agent
+        upto += weight
+    return agents_weighted[0][0]
+
+async def simulate_human_behavior(page):
+    """Orchestrates elite human behavior."""
+    try:
+        await smart_delay(0.5, 1.5)
+        await advanced_mouse_movement(page)
+        await realistic_scroll_behavior(page)
+        if random.random() > 0.5:
+            await advanced_mouse_movement(page)
+    except Exception:
+        pass
 
 async def monitor_loop():
     global current_proxy_index
@@ -274,8 +383,8 @@ async def monitor_loop():
                 
             browser = await p.chromium.launch(**launch_args)
             context = await browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-                viewport={'width': 1280, 'height': 720},
+                user_agent=get_realistic_user_agent(),
+                viewport={'width': random.randint(1280, 1920), 'height': random.randint(800, 1080)},
                 extra_http_headers={
                     "Accept-Language": "en-US,en;q=0.9",
                     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
@@ -293,7 +402,9 @@ async def monitor_loop():
                     
                     log_to_dashboard("Checking Pokémon Center...")
                     await page.goto(PC_URL, wait_until="domcontentloaded", timeout=60000)
-                    await asyncio.sleep(3)
+                    
+                    # Simulate human behavior to defeat behavioral tracking
+                    await simulate_human_behavior(page)
                     
                     # Take Screenshot for Dashboard
                     screenshot = await page.screenshot(type='jpeg', quality=50)
