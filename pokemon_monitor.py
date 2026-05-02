@@ -523,8 +523,8 @@ async def monitor_loop():
                         if "queue-it.net" in url:
                             await route.continue_()
                             return
-                        # Block heavy resource types
-                        if request.resource_type in ["image", "stylesheet", "font", "media"]:
+                        # Block heavy resource types (NOT stylesheets — blocking CSS triggers ad-blocker detection)
+                        if request.resource_type in ["image", "font", "media"]:
                             await route.abort()
                             return
                         # Block analytics & ad trackers
