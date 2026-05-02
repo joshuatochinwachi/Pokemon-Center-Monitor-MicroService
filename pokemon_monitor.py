@@ -510,7 +510,7 @@ async def monitor_loop():
                     page.on("request", lambda r: network_signals.update({'queue_it_detected': True}) if "queue-it.net" in r.url else None)
 
                     # ⚡ BANDWIDTH SAVER: Block heavy resources (saves up to 80% bandwidth)
-                    # CRITICAL: Always allow queue-it.net through for accurate detection
+                    # CRITICAL: Always allow queue-it.net through for accurate detection 
                     BLOCKED_DOMAINS = [
                         "google-analytics.com", "googletagmanager.com", "doubleclick.net",
                         "facebook.com", "hotjar.com", "newrelic.com", "quantserve.com",
