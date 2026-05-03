@@ -579,7 +579,7 @@ async def monitor_loop():
                     is_blocked = await detect_block(page)
                     
                     if is_blocked:
-                        retry_count = getattr(monitor_stats, '_retry_count', 0) + 1
+                        retry_count = monitor_stats.get('_retry_count', 0) + 1
                         monitor_stats['_retry_count'] = retry_count
                         log_to_dashboard(f"⚠️ IP BLOCKED BY IMPERVA (Attempt {retry_count}/{MAX_RETRIES})", "error")
                         
