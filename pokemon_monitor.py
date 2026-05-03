@@ -8,7 +8,7 @@ from playwright_stealth import stealth_async
 import os
 import base64
 import threading
-from flask import Flask, render_template_string
+from flask import Flask, render_template_string, request
 from flask_socketio import SocketIO
 from dotenv import load_dotenv
 
@@ -16,8 +16,9 @@ load_dotenv()
 
 # --- CONFIG ---
 PC_URL = "https://www.pokemoncenter.com"
-POLL_INTERVAL_MIN = 1800
-POLL_INTERVAL_MAX = 3600
+POLL_INTERVAL_MIN = 10800   # 3 hours (bandwidth conservation mode)
+POLL_INTERVAL_MAX = 21600   # 6 hours
+MAX_RETRIES = 50            # Max proxy rotations before sleeping (prevents bandwidth drain)
 
 # --- SMART KEY SELECTOR ---
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -135,14 +136,32 @@ HTML_TEMPLATE = """
 
 # --- GLOBAL TRACKERS ---
 monitor_stats = {"checks": 0, "state": "NORMAL"}
+last_screenshot = None      # Persists last screenshot for new connections
+recent_logs = []            # Persists recent logs for new connections
+MAX_LOG_HISTORY = 50        # Keep last 50 log entries
 
 def log_to_dashboard(message, type="info"):
+    global recent_logs
     print(f"[{type.upper()}] {message}")
-    socketio.emit('log', {'message': message, 'type': type})
+    log_entry = {'message': message, 'type': type}
+    recent_logs.append(log_entry)
+    recent_logs = recent_logs[-MAX_LOG_HISTORY:]  # Keep only last N logs
+    socketio.emit('log', log_entry)
 
 @app.route('/')
 def index():
     return render_template_string(HTML_TEMPLATE)
+
+# --- SEND STORED STATE TO NEW CONNECTIONS ---
+@socketio.on('connect')
+def handle_connect():
+    """When a new client connects, immediately send them the last screenshot and logs"""
+    global last_screenshot, recent_logs, monitor_stats
+    if last_screenshot:
+        socketio.emit('screenshot', last_screenshot, to=request.sid)
+    for log_entry in recent_logs:
+        socketio.emit('log', log_entry, to=request.sid)
+    socketio.emit('stats_update', monitor_stats, to=request.sid)
 
 # --- MONITOR CORE ---
 def get_headers(key=None):
@@ -553,14 +572,30 @@ async def monitor_loop():
                     # Take Screenshot for Dashboard
                     screenshot = await page.screenshot(type='jpeg', quality=50)
                     base64_screenshot = base64.b64encode(screenshot).decode('utf-8')
+                    global last_screenshot
+                    last_screenshot = base64_screenshot  # Persist for new connections
                     socketio.emit('screenshot', base64_screenshot)
                     
                     is_blocked = await detect_block(page)
                     
                     if is_blocked:
-                        log_to_dashboard("⚠️ IP BLOCKED BY IMPERVA (Access Restricted)", "error")
+                        retry_count = getattr(monitor_stats, '_retry_count', 0) + 1
+                        monitor_stats['_retry_count'] = retry_count
+                        log_to_dashboard(f"⚠️ IP BLOCKED BY IMPERVA (Attempt {retry_count}/{MAX_RETRIES})", "error")
+                        
+                        if retry_count >= MAX_RETRIES:
+                            log_to_dashboard(f"🛑 Max retries ({MAX_RETRIES}) reached. Sleeping to conserve bandwidth...", "error")
+                            monitor_stats['_retry_count'] = 0
+                            await page.close()
+                            await browser.close()
+                            # Sleep for a shorter period before trying again
+                            sleep_time = random.uniform(POLL_INTERVAL_MIN, POLL_INTERVAL_MAX)
+                            log_to_dashboard(f"💤 Sleeping for {int(sleep_time/60)} minutes before next check...", "info")
+                            await asyncio.sleep(sleep_time)
+                            break
+                        
                         log_to_dashboard("⏳ Applying 15s penalty cooldown for Webshare proxy to rotate properly...", "info")
-                        await asyncio.sleep(15)  # Penalty delay to prevent spamming and allow Webshare rotation
+                        await asyncio.sleep(15)
                         log_to_dashboard("🔄 Rotating to next proxy in pool...", "info")
                         if proxy_pool:
                             current_proxy_index = (current_proxy_index + 1) % len(proxy_pool)
@@ -586,6 +621,7 @@ async def monitor_loop():
                             await asyncio.sleep(3)
                             is_queue, confidence, signals = await detect_queue(page, network_signals)
                         
+                        monitor_stats['_retry_count'] = 0  # Reset retry count on success
                         new_state = "QUEUE_ACTIVE" if is_queue else "NORMAL"
                         await update_supabase_state(new_state, confidence, signals)
                         monitor_stats["state"] = new_state
