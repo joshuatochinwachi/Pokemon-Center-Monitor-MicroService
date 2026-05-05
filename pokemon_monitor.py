@@ -156,11 +156,19 @@ def log_to_dashboard(message, level="info"):
     socketio.emit('log', log_entry)
 
 # --- SCHEDULING LOGIC ---
-def calculate_next_sleep():
-    """Calculates seconds to sleep based on the Power Hour schedule (Mon-Fri, 2PM-8PM UTC)"""
+def calculate_next_sleep(current_state="NORMAL"):
+    """
+    Calculates seconds to sleep. 
+    If QUEUE is active, it stays awake 24/7 scanning every 30 mins.
+    If NORMAL, it follows the Power Hour schedule (Mon-Fri, 2PM-8PM UTC).
+    """
     now = datetime.now(timezone.utc)
     weekday = now.weekday()  # 0=Mon, 6=Sun
     hour = now.hour
+
+    # 1. QUEUE PERSISTENCE: If queue is active, stay awake regardless of time
+    if current_state == "QUEUE_ACTIVE":
+        return 1800, "QUEUE_WATCH"  # 30 minutes
     
     # 1. Weekend Logic (Sat=5, Sun=6)
     if weekday >= 5:
@@ -630,8 +638,11 @@ async def monitor_loop():
                             await browser.close()
                             
                             # Follow the schedule even after a failure
-                            sleep_time, mode = calculate_next_sleep()
-                            log_to_dashboard(f"😴 Schedule Pause ({mode}). Sleeping for {int(sleep_time/3600)} hours...", "info")
+                            sleep_time, mode = calculate_next_sleep(monitor_stats["state"])
+                            if mode == "QUEUE_WATCH":
+                                log_to_dashboard(f"🚨 Queue Persistence: Next retry in 30 minutes...", "info")
+                            else:
+                                log_to_dashboard(f"😴 Schedule Pause ({mode}). Sleeping for {int(sleep_time/3600)} hours...", "info")
                             await asyncio.sleep(sleep_time)
                             break
                         
@@ -674,9 +685,11 @@ async def monitor_loop():
                         await page.close()
                         
                         # Calculate next sleep based on schedule
-                        sleep_time, mode = calculate_next_sleep()
+                        sleep_time, mode = calculate_next_sleep(new_state)
                         
-                        if mode == "ACTIVE_SCANNING":
+                        if mode == "QUEUE_WATCH":
+                            log_to_dashboard(f"🚨 Queue Persistent Watch: Next check in 30 minutes...", "info")
+                        elif mode == "ACTIVE_SCANNING":
                             log_to_dashboard(f"💤 Power Hour Active. Next check in {int(sleep_time/60)} minutes...", "info")
                         else:
                             log_to_dashboard(f"😴 Schedule Pause ({mode}). Sleeping for {int(sleep_time/3600)} hours...", "info")

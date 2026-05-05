@@ -62,8 +62,32 @@ Every weekday (Monday–Friday), the monitor operates on a high-intensity **"Pow
 2.  **Proxy Jump**: A new gateway is selected from the 100-node Webshare pool.
 3.  **Fingerprint Randomization**: A unique User-Agent and viewport are assigned.
 4.  **⚡ Bandwidth Saver Mode**: To stay within a 1GB/month budget, the monitor **blocks all images and heavy CSS assets** during the scan. This reduces page weight by ~90%, allowing for thousands of checks per month.
-5.  **🕒 Power Hour Scheduling**: The engine only wakes up between **2:00 PM and 8:00 PM UTC** on weekdays. During this window, it performs high-frequency scans every **45–60 minutes** to ensure it never misses a drop.
-6.  **Weekend Pause**: The system automatically enters a deep-sleep state on Saturdays and Sundays.
+5.  **🕒 Power Hour Scheduling**: The engine normally wakes up between **2:00 PM and 8:00 PM UTC** on weekdays. During this window, it performs scans every **45–60 minutes**.
+6.  **🐕 Persistent Watchdog (Override)**: If a queue is detected, the monitor **ignores its bedtime**. It will stay awake 24/7 and increase scan frequency to **every 30 minutes** until the site returns to normal.
+7.  **Weekend Pause**: The system automatically enters a deep-sleep state on Saturdays and Sundays (unless a queue was already active).
+
+```mermaid
+stateDiagram-v2
+    [*] --> Idle: Weekend or Off-Hours
+    Idle --> PowerHour: Weekday 14:00 UTC
+    PowerHour --> Idle: Weekday 20:00 UTC
+    
+    PowerHour --> QueueWatch: Queue Detected!
+    Idle --> QueueWatch: Queue Detected! (Override)
+    
+    QueueWatch --> QueueWatch: Scan every 30m
+    QueueWatch --> Idle: Queue Over & Past 20:00 UTC
+    QueueWatch --> PowerHour: Queue Over & Inside Window
+```
+
+### **Engine Modes (Log Key)**
+When viewing the **Live Dashboard**, you will see these modes in the logs:
+*   `ACTIVE_SCANNING`: Power Hour is active; checking every 45-60 mins.
+*   `QUEUE_WATCH`: 🐕 Watchdog active; queue detected, checking every 30 mins 24/7.
+*   `MORNING_WAIT`: Weekday morning; sleeping until 2:00 PM UTC.
+*   `EVENING_PAUSE`: Power Hour ended; sleeping until 2:00 PM UTC tomorrow.
+*   `WEEKEND_PAUSE`: Saturday/Sunday; sleeping until Monday 2:00 PM UTC.
+*   `WEEKEND_WATCH`: Queue started on a weekend; staying awake to monitor.
 
 ### Step B: Human Behavioral Simulation
 To bypass behavioral analysis, the monitor does NOT just load the page. It mimics a human:
@@ -139,9 +163,27 @@ sequenceDiagram
 
 ---
 
-## 5. System Health & Maintenance
+## 5. Deployment & Configuration
+
+The monitor is designed to be deployed on **Railway.app** or any VPS with Docker support. It requires the following environment variables to be set:
+
+### **Supabase Connectivity**
+*   `SUPABASE_URL`: Your Supabase project URL.
+*   `SUPABASE_SERVICE_ROLE_KEY`: The 'service_role' key for administrative database access.
+*   `SUPABASE_ANON_KEY`: (Optional) Fallback key for state updates.
+
+### **Proxy Configuration**
+*   `PROXY_LIST`: A comma-separated list of Webshare-style proxies in `ip:port:user:pass` format.
+*   *OR*
+*   `PROXY_SERVER`, `PROXY_USERNAME`, `PROXY_PASSWORD`: For single proxy configurations.
+
+### **Server Settings**
+*   `PORT`: The port for the Live Dashboard (Defaults to 5000 on Railway).
+
+## 6. System Health & Maintenance
 
 The monitor is designed for "Set and Forget" operation:
 *   **Auto-Healing (Imperva Resilience)**: If it detects an "IP Block," it applies a 15-second penalty cooldown and rotates to a new proxy. It will attempt this up to **50 times** per cycle to ensure a successful check even during high-traffic blocks.
 *   **Persistent Dashboard**: Uses a server-side memory cache (Socket.io) to store the `last_screenshot` and `recent_logs`. Stakeholders opening the link see the latest data **instantly** without triggering a new, bandwidth-expensive scan.
 *   **Confidence Threshold**: `is_active` is only triggered if **2 or more sensors** fire simultaneously, ensuring near-zero false alarms.
+*   **State-Aware Sleep**: Automatically respects the 2 PM – 8 PM UTC window but stays awake past bedtime if a queue is detected.
