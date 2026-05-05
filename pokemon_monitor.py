@@ -159,7 +159,7 @@ def log_to_dashboard(message, level="info"):
 def calculate_next_sleep(current_state="NORMAL"):
     """
     Calculates seconds to sleep. 
-    If QUEUE is active, it stays awake 24/7 scanning every 30 mins.
+    If QUEUE is active, it stays awake as a Persistent Watchdog scanning every 30 mins.
     If NORMAL, it follows the Power Hour schedule (Mon-Fri, 2PM-8PM UTC).
     """
     now = datetime.now(timezone.utc)

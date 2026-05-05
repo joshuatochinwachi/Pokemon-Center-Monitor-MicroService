@@ -63,7 +63,7 @@ Every weekday (Monday–Friday), the monitor operates on a high-intensity **"Pow
 3.  **Fingerprint Randomization**: A unique User-Agent and viewport are assigned.
 4.  **⚡ Bandwidth Saver Mode**: To stay within a 1GB/month budget, the monitor **blocks all images and heavy CSS assets** during the scan. This reduces page weight by ~90%, allowing for thousands of checks per month.
 5.  **🕒 Power Hour Scheduling**: The engine normally wakes up between **2:00 PM and 8:00 PM UTC** on weekdays. During this window, it performs scans every **45–60 minutes**.
-6.  **🐕 Persistent Watchdog (Override)**: If a queue is detected, the monitor **ignores its bedtime**. It will stay awake 24/7 and increase scan frequency to **every 30 minutes** until the site returns to normal.
+6.  **🐕 Persistent Watchdog (Override)**: If a queue is detected, the monitor **ignores its bedtime**. It will stay awake and increase scan frequency to **every 30 minutes** until the site returns to normal.
 7.  **Weekend Pause**: The system automatically enters a deep-sleep state on Saturdays and Sundays (unless a queue was already active).
 
 ```mermaid
@@ -83,7 +83,7 @@ stateDiagram-v2
 ### **Engine Modes (Log Key)**
 When viewing the **Live Dashboard**, you will see these modes in the logs:
 *   `ACTIVE_SCANNING`: Power Hour is active; checking every 45-60 mins.
-*   `QUEUE_WATCH`: 🐕 Watchdog active; queue detected, checking every 30 mins 24/7.
+*   `QUEUE_WATCH`: 🐕 Watchdog active; queue detected, checking every 30 mins until normal.
 *   `MORNING_WAIT`: Weekday morning; sleeping until 2:00 PM UTC.
 *   `EVENING_PAUSE`: Power Hour ended; sleeping until 2:00 PM UTC tomorrow.
 *   `WEEKEND_PAUSE`: Saturday/Sunday; sleeping until Monday 2:00 PM UTC.
