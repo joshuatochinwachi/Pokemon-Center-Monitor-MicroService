@@ -1,13 +1,14 @@
 import asyncio
 import time
 import random
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import httpx
 from playwright.async_api import async_playwright
 from playwright_stealth import stealth_async
 import os
 import base64
 import threading
+import re
 from flask import Flask, render_template_string, request
 from flask_socketio import SocketIO
 from dotenv import load_dotenv
@@ -16,9 +17,13 @@ load_dotenv()
 
 # --- CONFIG ---
 PC_URL = "https://www.pokemoncenter.com"
-POLL_INTERVAL_MIN = 10800   # 3 hours (bandwidth conservation mode)
-POLL_INTERVAL_MAX = 21600   # 6 hours
-MAX_RETRIES = 50            # Max proxy rotations before sleeping (prevents bandwidth drain)
+MAX_RETRIES = 50            # Max proxy rotations before sleeping
+
+# Power Hour Config (UTC)
+ACTIVE_START_HOUR = 14  # 2 PM UTC
+ACTIVE_END_HOUR = 20    # 8 PM UTC
+SCAN_INTERVAL_MIN = 2700  # 45 minutes
+SCAN_INTERVAL_MAX = 3600  # 60 minutes
 
 # --- SMART KEY SELECTOR ---
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -108,7 +113,7 @@ HTML_TEMPLATE = """
             const div = document.createElement('div');
             div.className = 'log-entry';
             const typeClass = data.type === 'success' ? 'log-msg-success' : (data.type === 'error' ? 'log-msg-error' : 'log-msg-info');
-            div.innerHTML = `<span class="log-time">[${new Date().toLocaleTimeString()}]</span><span class="${typeClass}">${data.message}</span>`;
+            div.innerHTML = `<span class="${typeClass}">${data.message}</span>`;
             logs.insertBefore(div, logs.firstChild);
             if (logs.children.length > 50) logs.removeChild(logs.lastChild);
         });
@@ -140,13 +145,49 @@ last_screenshot = None      # Persists last screenshot for new connections
 recent_logs = []            # Persists recent logs for new connections
 MAX_LOG_HISTORY = 50        # Keep last 50 log entries
 
-def log_to_dashboard(message, type="info"):
+def log_to_dashboard(message, level="info"):
     global recent_logs
-    print(f"[{type.upper()}] {message}")
-    log_entry = {'message': message, 'type': type}
+    utc_now = datetime.now(timezone.utc).strftime('%H:%M:%S UTC')
+    full_message = f"[{utc_now}] {message}"
+    print(f"[{level.upper()}] {full_message}")
+    log_entry = {'message': full_message, 'type': level}
     recent_logs.append(log_entry)
     recent_logs = recent_logs[-MAX_LOG_HISTORY:]  # Keep only last N logs
     socketio.emit('log', log_entry)
+
+# --- SCHEDULING LOGIC ---
+def calculate_next_sleep():
+    """Calculates seconds to sleep based on the Power Hour schedule (Mon-Fri, 2PM-8PM UTC)"""
+    now = datetime.now(timezone.utc)
+    weekday = now.weekday()  # 0=Mon, 6=Sun
+    hour = now.hour
+    
+    # 1. Weekend Logic (Sat=5, Sun=6)
+    if weekday >= 5:
+        # Calculate seconds until Monday 2 PM UTC
+        days_to_monday = 7 - weekday
+        monday_2pm = now.replace(hour=ACTIVE_START_HOUR, minute=0, second=0, microsecond=0) + timedelta(days=days_to_monday)
+        sleep_secs = (monday_2pm - now).total_seconds()
+        return max(sleep_secs, 3600), "WEEKEND_PAUSE"
+
+    # 2. Weekday Outside-Hours Logic
+    if hour < ACTIVE_START_HOUR:
+        # It's morning, wait until 2 PM UTC today
+        today_2pm = now.replace(hour=ACTIVE_START_HOUR, minute=0, second=0, microsecond=0)
+        sleep_secs = (today_2pm - now).total_seconds()
+        return max(sleep_secs, 300), "MORNING_WAIT"
+        
+    if hour >= ACTIVE_END_HOUR:
+        # It's evening, wait until 2 PM UTC tomorrow
+        tomorrow_2pm = now.replace(hour=ACTIVE_START_HOUR, minute=0, second=0, microsecond=0) + timedelta(days=1)
+        sleep_secs = (tomorrow_2pm - now).total_seconds()
+        # If tomorrow is Saturday, this will be handled by the next loop's Weekend logic
+        return max(sleep_secs, 3600), "EVENING_PAUSE"
+
+    # 3. Inside Power Hours (2PM-8PM UTC)
+    # Scan every 45-60 mins
+    sleep_secs = random.uniform(SCAN_INTERVAL_MIN, SCAN_INTERVAL_MAX)
+    return sleep_secs, "ACTIVE_SCANNING"
 
 @app.route('/')
 def index():
@@ -304,7 +345,6 @@ async def detect_queue(page, network_signals):
     # Pattern 1: Standard Digital (02:30:00 or 15:45)
     # Pattern 2: Text-based (5 minutes, 1 hour, 30 secs)
     # Pattern 3: Hybrid (00h 05m 10s)
-    import re
     time_patterns = [
         r'\b\d{1,2}:\d{2}(:\d{2})?\b', 
         r'\d+\s*(?:hr|min|sec|hour|minute|second)s?\b',
@@ -584,13 +624,14 @@ async def monitor_loop():
                         log_to_dashboard(f"⚠️ IP BLOCKED BY IMPERVA (Attempt {retry_count}/{MAX_RETRIES})", "error")
                         
                         if retry_count >= MAX_RETRIES:
-                            log_to_dashboard(f"🛑 Max retries ({MAX_RETRIES}) reached. Sleeping to conserve bandwidth...", "error")
+                            log_to_dashboard(f"🛑 Max retries ({MAX_RETRIES}) reached.", "error")
                             monitor_stats['_retry_count'] = 0
                             await page.close()
                             await browser.close()
-                            # Sleep for a shorter period before trying again
-                            sleep_time = random.uniform(POLL_INTERVAL_MIN, POLL_INTERVAL_MAX)
-                            log_to_dashboard(f"💤 Sleeping for {int(sleep_time/60)} minutes before next check...", "info")
+                            
+                            # Follow the schedule even after a failure
+                            sleep_time, mode = calculate_next_sleep()
+                            log_to_dashboard(f"😴 Schedule Pause ({mode}). Sleeping for {int(sleep_time/3600)} hours...", "info")
                             await asyncio.sleep(sleep_time)
                             break
                         
@@ -632,23 +673,29 @@ async def monitor_loop():
                         
                         await page.close()
                         
-                        # Sleep before next check
-                        sleep_time = random.uniform(POLL_INTERVAL_MIN, POLL_INTERVAL_MAX)
-                        log_to_dashboard(f"💤 Sleeping for {int(sleep_time/60)} minutes before next check...", "info")
+                        # Calculate next sleep based on schedule
+                        sleep_time, mode = calculate_next_sleep()
+                        
+                        if mode == "ACTIVE_SCANNING":
+                            log_to_dashboard(f"💤 Power Hour Active. Next check in {int(sleep_time/60)} minutes...", "info")
+                        else:
+                            log_to_dashboard(f"😴 Schedule Pause ({mode}). Sleeping for {int(sleep_time/3600)} hours...", "info")
+                            
                         await asyncio.sleep(sleep_time)
                         
-                        # Force complete session isolation: destroy browser and rotate country gateway
+                        # Force complete session isolation
                         if proxy_pool:
                             current_proxy_index = (current_proxy_index + 1) % len(proxy_pool)
                         await browser.close()
-                        break # Break inner loop, launch entirely new browser for next check
+                        break 
                     
                 except Exception as e:
                     log_to_dashboard(f"Monitor Loop Error: {e}", "error")
-                    if proxy_pool:
-                        current_proxy_index = (current_proxy_index + 1) % len(proxy_pool)
-                    await browser.close()
-                    break # Break inner loop on crash to reset browser
+                    try:
+                        if 'page' in locals(): await page.close()
+                        if 'browser' in locals(): await browser.close()
+                    except: pass
+                    await asyncio.sleep(60) # Wait a minute before restarting loop on crash
 
 def run_monitor():
     loop = asyncio.new_event_loop()

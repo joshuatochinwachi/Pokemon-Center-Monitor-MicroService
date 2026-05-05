@@ -55,12 +55,15 @@ graph TD
 
 ## 2. Working Mechanism: The "Ghost-Mode" Loop
 
-Every 30-60 minutes (configurable), the monitor initiates a check. To remain undetected by **Imperva**, it follows a strict isolation protocol.
+Every weekday (Monday–Friday), the monitor operates on a high-intensity **"Power Hour" schedule**. It remains completely dormant during weekends and off-hours to maximize bandwidth conservation.
 
-### Step A: Total Session Isolation
+### Step A: Total Session Isolation & Bandwidth Optimization
 1.  **Browser Destruction**: The previous browser instance is completely killed. No cache, no cookies, no local storage persists.
 2.  **Proxy Jump**: A new gateway is selected from the 100-node Webshare pool.
 3.  **Fingerprint Randomization**: A unique User-Agent and viewport are assigned.
+4.  **⚡ Bandwidth Saver Mode**: To stay within a 1GB/month budget, the monitor **blocks all images and heavy CSS assets** during the scan. This reduces page weight by ~90%, allowing for thousands of checks per month.
+5.  **🕒 Power Hour Scheduling**: The engine only wakes up between **2:00 PM and 8:00 PM UTC** on weekdays. During this window, it performs high-frequency scans every **45–60 minutes** to ensure it never misses a drop.
+6.  **Weekend Pause**: The system automatically enters a deep-sleep state on Saturdays and Sundays.
 
 ### Step B: Human Behavioral Simulation
 To bypass behavioral analysis, the monitor does NOT just load the page. It mimics a human:
@@ -139,6 +142,6 @@ sequenceDiagram
 ## 5. System Health & Maintenance
 
 The monitor is designed for "Set and Forget" operation:
-*   **Auto-Healing**: If it detects an "Error 15" (Block), it enters a cooldown and jumps to a new proxy node automatically.
-*   **Status Dashboard**: A live web dashboard (Socket.io) shows the monitor's "eyes" in real-time, including logs and confidence scores.
+*   **Auto-Healing (Imperva Resilience)**: If it detects an "IP Block," it applies a 15-second penalty cooldown and rotates to a new proxy. It will attempt this up to **50 times** per cycle to ensure a successful check even during high-traffic blocks.
+*   **Persistent Dashboard**: Uses a server-side memory cache (Socket.io) to store the `last_screenshot` and `recent_logs`. Stakeholders opening the link see the latest data **instantly** without triggering a new, bandwidth-expensive scan.
 *   **Confidence Threshold**: `is_active` is only triggered if **2 or more sensors** fire simultaneously, ensuring near-zero false alarms.
