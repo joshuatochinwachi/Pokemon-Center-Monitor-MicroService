@@ -76,7 +76,7 @@ async def fire_push_notifications(state):
             
             push_payload = [{
                 "to": t,
-                "title": "🚨 Pokémon Center Monitor (TEST)",
+                "title": "🚨 Pokémon Center Monitor",
                 "body": "The Queue is LIVE! • Join the line now! 🏃‍♂️💨",
                 "data": {"type": "pc_monitor", "state": state},
                 "sound": "default",
