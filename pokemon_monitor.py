@@ -709,6 +709,7 @@ async def monitor_loop():
                         if 'browser' in locals(): await browser.close()
                     except: pass
                     await asyncio.sleep(60) # Wait a minute before restarting loop on crash
+                    break
 
 def run_monitor():
     loop = asyncio.new_event_loop()
