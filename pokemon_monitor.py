@@ -1,3 +1,5 @@
+import eventlet
+eventlet.monkey_patch()
 import asyncio
 import time
 import random
@@ -47,7 +49,7 @@ current_proxy_index = 0
 
 # --- FLASK DASHBOARD SETUP ---
 app = Flask(__name__)
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -187,9 +189,16 @@ def calculate_next_sleep(current_state="NORMAL"):
         
     if hour >= ACTIVE_END_HOUR:
         # It's evening, wait until 2 PM UTC tomorrow
+        tomorrow = now + timedelta(days=1)
+        if tomorrow.weekday() >= 5:
+            # If tomorrow is Saturday, sleep until Monday 2 PM UTC
+            days_to_monday = (7 - tomorrow.weekday())
+            monday_2pm = tomorrow.replace(hour=ACTIVE_START_HOUR, minute=0, second=0, microsecond=0) + timedelta(days=days_to_monday)
+            sleep_secs = (monday_2pm - now).total_seconds()
+            return max(sleep_secs, 3600), "WEEKEND_PAUSE"
+            
         tomorrow_2pm = now.replace(hour=ACTIVE_START_HOUR, minute=0, second=0, microsecond=0) + timedelta(days=1)
         sleep_secs = (tomorrow_2pm - now).total_seconds()
-        # If tomorrow is Saturday, this will be handled by the next loop's Weekend logic
         return max(sleep_secs, 3600), "EVENING_PAUSE"
 
     # 3. Inside Power Hours (2PM-8PM UTC)
@@ -527,8 +536,8 @@ async def simulate_human_behavior(page):
 async def monitor_loop():
     global current_proxy_index
     log_to_dashboard("Elite Monitor Engine Starting...", "info")
-    async with async_playwright() as p:
-        while True:
+    while True:
+        async with async_playwright() as p:
             launch_args = {
                 "headless": True,
                 "args": [
@@ -537,6 +546,8 @@ async def monitor_loop():
                     "--no-sandbox",
                     "--disable-setuid-sandbox",
                     "--ignore-certificate-errors",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
                 ]
             }
             
