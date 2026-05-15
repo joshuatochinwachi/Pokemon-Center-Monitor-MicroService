@@ -304,7 +304,8 @@ async def fire_push_notifications(state):
 
 async def update_supabase_state(state, confidence=1.0, details=None):
     try:
-        async with httpx.AsyncClient() as client:
+        # Senior Fix: Use a dedicated timeout and detailed error reporting
+        async with httpx.AsyncClient(timeout=15.0) as client:
             payload = {
                 "state": state, "confidence_score": confidence,
                 "last_checked": datetime.now(timezone.utc).isoformat(),
@@ -313,19 +314,30 @@ async def update_supabase_state(state, confidence=1.0, details=None):
             }
             if state == "QUEUE_ACTIVE":
                 payload["detected_at"] = datetime.now(timezone.utc).isoformat()
+            
+            if not SUPABASE_URL:
+                log_to_dashboard("DB Error: SUPABASE_URL is missing from environment!", "error")
+                return
+
             endpoint = f"{SUPABASE_URL}/rest/v1/pc_monitor_state?id=neq.00000000-0000-0000-0000-000000000000"
             response = await client.patch(endpoint, headers=get_headers(), json=payload)
+            
             if response.status_code not in [200, 204] and ANON_KEY and PRIMARY_KEY != ANON_KEY:
-                log_to_dashboard("Primary Key Failed. Trying Fail-Safe...", "error")
+                log_to_dashboard(f"Primary Key Failed ({response.status_code}). Trying Fail-Safe...", "error")
                 response = await client.patch(endpoint, headers=get_headers(ANON_KEY), json=payload)
             
-            if state == "QUEUE_ACTIVE" and response.status_code in [200, 204]:
-                await fire_push_notifications(state)
+            if response.status_code in [200, 204]:
+                if state == "QUEUE_ACTIVE":
+                    await fire_push_notifications(state)
+            else:
+                log_to_dashboard(f"DB Update Failed: Status {response.status_code}", "error")
             
             monitor_stats["state"] = state
             socketio.emit('stats_update', monitor_stats)
     except Exception as e:
-        log_to_dashboard(f"DB Error: {e}", "error")
+        # Detailed error reporting (Type + Message) to identify Eventlet conflicts
+        error_type = type(e).__name__
+        log_to_dashboard(f"DB Error: {error_type} - {str(e)}", "error")
 
 async def detect_queue(page, network_signals):
     signals = {
