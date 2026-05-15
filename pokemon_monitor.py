@@ -1,5 +1,3 @@
-import eventlet
-eventlet.monkey_patch()
 import asyncio
 import time
 import random
@@ -49,7 +47,7 @@ current_proxy_index = 0
 
 # --- FLASK DASHBOARD SETUP ---
 app = Flask(__name__)
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading', websocket_payload_size=1000000)
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -103,7 +101,7 @@ HTML_TEMPLATE = """
     </div>
 
     <script>
-        const socket = io();
+        const socket = io({transports: ['websocket']});
         const img = document.getElementById('live-stream');
         const logs = document.getElementById('logs');
         
@@ -231,109 +229,100 @@ def get_headers(key=None):
     }
 
 async def fire_push_notifications(state):
-    def sync_push():
-        try:
-            # VETERAN FIX: Use synchronous Client inside executor for guaranteed delivery
-            with httpx.Client(timeout=30.0) as client:
-                # 1. Fetch tokens
-                resp = client.get(
-                    f"{SUPABASE_URL}/rest/v1/pc_monitor_subscribers?is_active=eq.true&select=users!inner(subscription_status,subscription_end,push_tokens)",
-                    headers=get_headers()
-                )
-                if resp.status_code != 200: return f"Token Query Failed: {resp.status_code}"
+    try:
+        now_iso = datetime.now(timezone.utc).isoformat()
+        async with httpx.AsyncClient() as client:
+            # Query active premium subscribers
+            resp = await client.get(
+                f"{SUPABASE_URL}/rest/v1/pc_monitor_subscribers?is_active=eq.true&select=users!inner(subscription_status,subscription_end,push_tokens)",
+                headers=get_headers()
+            )
+            
+            if resp.status_code != 200:
+                log_to_dashboard(f"Push Query Failed: {resp.status_code}", "error")
+                return
                 
-                data = resp.json()
-                valid_tokens = []
-                for row in data:
-                    user = row.get("users")
-                    if not user: continue
-                    if user.get("subscription_status") == "active":
-                        # (Expiry check logic preserved)
-                        sub_end = user.get("subscription_end")
-                        is_expired = False
-                        if sub_end:
-                            try:
-                                end_dt = datetime.fromisoformat(sub_end.replace('Z', '+00:00'))
-                                if end_dt < datetime.now(timezone.utc): is_expired = True
-                            except: pass
-                        
-                        user_tokens = user.get("push_tokens") or []
-                        if not is_expired and isinstance(user_tokens, list):
-                            for token in user_tokens:
-                                if token and token.startswith("ExponentPushToken"):
-                                    valid_tokens.append(token)
+            data = resp.json()
+            valid_tokens = []
+            
+            for row in data:
+                user = row.get("users")
+                if not user: continue
                 
-                if not valid_tokens: return "No valid tokens"
+                is_active = user.get("subscription_status") == "active"
+                sub_end = user.get("subscription_end")
+                user_tokens = user.get("push_tokens") or [] 
                 
-                # 2. Fire Push
-                push_payload = [{
-                    "to": t, "title": "🚨 Pokémon Center Monitor",
-                    "body": "The Queue is LIVE! • Join the line now! 🏃‍♂️💨",
-                    "data": {"type": "pc_monitor", "state": state},
-                    "sound": "default", "priority": "high", "badge": 1,
-                    "channelId": "default", "ttl": 2419200
-                } for t in valid_tokens]
+                is_expired = False
+                if sub_end:
+                    try:
+                        end_dt = datetime.fromisoformat(sub_end.replace('Z', '+00:00'))
+                        if end_dt < datetime.now(timezone.utc):
+                            is_expired = True
+                    except:
+                        pass
                 
-                push_resp = client.post(
-                    "https://exp.host/--/api/v2/push/send",
-                    headers={"Accept": "application/json", "Content-Type": "application/json"},
-                    json=push_payload
-                )
-                return f"Alerts fired to {len(push_payload)} users"
-        except Exception as e:
-            return f"Push Error: {e}"
-
-    loop = asyncio.get_event_loop()
-    result = await loop.run_in_executor(None, sync_push)
-    log_to_dashboard(result, "success" if "fired" in result else "info")
+                if is_active and not is_expired and isinstance(user_tokens, list):
+                    for token in user_tokens:
+                        if token and token.startswith("ExponentPushToken"):
+                            valid_tokens.append(token)
+            
+            if not valid_tokens:
+                log_to_dashboard("No active premium subscribers found with valid tokens.", "info")
+                return
+                
+            push_payload = [{
+                "to": t,
+                "title": "🚨 Pokémon Center Monitor",
+                "body": "The Queue is LIVE! • Join the line now! 🏃‍♂️💨",
+                "data": {
+                    "type": "pc_monitor", 
+                    "state": state
+                },
+                "sound": "default",
+                "priority": "high",
+                "badge": 1,
+                "channelId": "default",
+                "ttl": 2419200
+            } for t in valid_tokens]
+            
+            await client.post(
+                "https://exp.host/--/api/v2/push/send",
+                headers={
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                },
+                json=push_payload
+            )
+            log_to_dashboard(f"Alerts fired to {len(push_payload)} premium users", "success")
+    except Exception as e:
+        log_to_dashboard(f"Push Error: {e}", "error")
 
 async def update_supabase_state(state, confidence=1.0, details=None):
-    """
-    VETERAN FIX: Uses a synchronous executor to bypass Eventlet/Asyncio DNS conflicts.
-    This ensures DB updates succeed even when the asyncio loop is under heavy load.
-    """
-    def sync_db_patch():
-        if not SUPABASE_URL:
-            return "MISSING_URL"
-            
-        payload = {
-            "state": state, "confidence_score": confidence,
-            "last_checked": datetime.now(timezone.utc).isoformat(),
-            "queue_details": details or {}, "monitor_healthy": True,
-            "updated_at": datetime.now(timezone.utc).isoformat()
-        }
-        if state == "QUEUE_ACTIVE":
-            payload["detected_at"] = datetime.now(timezone.utc).isoformat()
-
-        endpoint = f"{SUPABASE_URL}/rest/v1/pc_monitor_state?id=neq.00000000-0000-0000-0000-000000000000"
-        
-        # Use synchronous httpx for stability under Eventlet monkeypatch
-        with httpx.Client(timeout=20.0) as client:
-            resp = client.patch(endpoint, headers=get_headers(), json=payload)
-            if resp.status_code not in [200, 204] and ANON_KEY and PRIMARY_KEY != ANON_KEY:
-                resp = client.patch(endpoint, headers=get_headers(ANON_KEY), json=payload)
-            return resp.status_code
-
     try:
-        loop = asyncio.get_event_loop()
-        status_code = await loop.run_in_executor(None, sync_db_patch)
-        
-        if status_code == "MISSING_URL":
-            log_to_dashboard("DB Error: SUPABASE_URL is missing!", "error")
-            return
-
-        if status_code in [200, 204]:
+        async with httpx.AsyncClient() as client:
+            payload = {
+                "state": state, "confidence_score": confidence,
+                "last_checked": datetime.now(timezone.utc).isoformat(),
+                "queue_details": details or {}, "monitor_healthy": True,
+                "updated_at": datetime.now(timezone.utc).isoformat()
+            }
             if state == "QUEUE_ACTIVE":
-                await fire_push_notifications(state)
-        else:
-            log_to_dashboard(f"DB Update Failed: Status {status_code}", "error")
+                payload["detected_at"] = datetime.now(timezone.utc).isoformat()
+            endpoint = f"{SUPABASE_URL}/rest/v1/pc_monitor_state?id=neq.00000000-0000-0000-0000-000000000000"
+            response = await client.patch(endpoint, headers=get_headers(), json=payload)
+            if response.status_code not in [200, 204] and ANON_KEY and PRIMARY_KEY != ANON_KEY:
+                log_to_dashboard("Primary Key Failed. Trying Fail-Safe...", "error")
+                response = await client.patch(endpoint, headers=get_headers(ANON_KEY), json=payload)
             
-        monitor_stats["state"] = state
-        socketio.emit('stats_update', monitor_stats)
-        
+            if response.status_code in [200, 204]:
+                if state == "QUEUE_ACTIVE":
+                    await fire_push_notifications(state)
+            
+            monitor_stats["state"] = state
+            socketio.emit('stats_update', monitor_stats)
     except Exception as e:
-        error_type = type(e).__name__
-        log_to_dashboard(f"DB Error: {error_type} - {str(e)}", "error")
+        log_to_dashboard(f"DB Error: {e}", "error")
 
 async def detect_queue(page, network_signals):
     signals = {
