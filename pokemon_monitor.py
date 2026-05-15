@@ -47,7 +47,9 @@ current_proxy_index = 0
 
 # --- FLASK DASHBOARD SETUP ---
 app = Flask(__name__)
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading', websocket_payload_size=1000000)
+# VETERAN FIX: Use eventlet mode for the server but NO monkey_patch() at the top.
+# This fixes the dashboard 'AssertionError' while keeping proxies/DB on standard stable networking.
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet', max_http_buffer_size=1000000)
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -109,13 +111,18 @@ HTML_TEMPLATE = """
             img.src = 'data:image/jpeg;base64,' + data;
         });
 
-        socket.on('log', data => {
+        let lastLogMsg = "";
+        socket.on('log_update', (data) => {
+            // VETERAN FIX: Ignore duplicates if message and time are identical
+            const logId = data.time + data.msg;
+            if (lastLogMsg === logId) return;
+            lastLogMsg = logId;
+
             const div = document.createElement('div');
             div.className = 'log-entry';
-            const typeClass = data.type === 'success' ? 'log-msg-success' : (data.type === 'error' ? 'log-msg-error' : 'log-msg-info');
-            div.innerHTML = `<span class="${typeClass}">${data.message}</span>`;
+            div.innerHTML = `<span class="log-time">[${data.time}]</span> <span class="log-msg-${data.type}">${data.msg}</span>`;
             logs.insertBefore(div, logs.firstChild);
-            if (logs.children.length > 50) logs.removeChild(logs.lastChild);
+            if (logs.children.length > 50) logs.lastChild.remove();
         });
 
         socket.on('stats_update', data => {
@@ -148,12 +155,14 @@ MAX_LOG_HISTORY = 50        # Keep last 50 log entries
 def log_to_dashboard(message, level="info"):
     global recent_logs
     utc_now = datetime.now(timezone.utc).strftime('%H:%M:%S UTC')
-    full_message = f"[{utc_now}] {message}"
-    print(f"[{level.upper()}] {full_message}")
-    log_entry = {'message': full_message, 'type': level}
+    print(f"[{level.upper()}] [{utc_now}] {message}")
+    
+    # VETERAN FIX: Use consistent keys (msg, type, time) to match JS listener
+    log_entry = {'msg': message, 'type': level, 'time': utc_now}
+    
     recent_logs.append(log_entry)
-    recent_logs = recent_logs[-MAX_LOG_HISTORY:]  # Keep only last N logs
-    socketio.emit('log', log_entry)
+    recent_logs = recent_logs[-MAX_LOG_HISTORY:]
+    socketio.emit('log_update', log_entry)
 
 # --- SCHEDULING LOGIC ---
 def calculate_next_sleep(current_state="NORMAL"):
@@ -216,7 +225,7 @@ def handle_connect():
     if last_screenshot:
         socketio.emit('screenshot', last_screenshot, to=request.sid)
     for log_entry in recent_logs:
-        socketio.emit('log', log_entry, to=request.sid)
+        socketio.emit('log_update', log_entry, to=request.sid)
     socketio.emit('stats_update', monitor_stats, to=request.sid)
 
 # --- MONITOR CORE ---
