@@ -430,7 +430,10 @@ async def detect_block(page):
         "slide right to secure your access",
         "we detected unusual activity",
         "additional security check is required",
-        "i am human"
+        "i am human",
+        "enable js",
+        "disable any ad blocker",
+        "please enable javascript"
     ]
     
     if any(word in content_lower for word in block_keywords):
