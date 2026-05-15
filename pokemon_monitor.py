@@ -723,6 +723,9 @@ async def monitor_loop():
                     
                 except Exception as e:
                     log_to_dashboard(f"Monitor Loop Error: {e}", "error")
+                    # Rotate proxy immediately if the current one caused a crash/error
+                    if proxy_pool:
+                        current_proxy_index = (current_proxy_index + 1) % len(proxy_pool)
                     try:
                         if 'page' in locals(): await page.close()
                         if 'browser' in locals(): await browser.close()
