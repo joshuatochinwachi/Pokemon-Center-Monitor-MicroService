@@ -55,7 +55,7 @@ graph TD
 
 ## 2. Working Mechanism: The "Ghost-Mode" Loop
 
-Every weekday (Monday–Friday), the monitor operates on a high-intensity **"Power Hour" schedule**. It remains completely dormant during weekends and off-hours to maximize bandwidth conservation.
+Every weekday (Monday–Friday), the monitor operates on a high-intensity **"Power Hour" schedule**. It remains completely dormant during weekends and off-hours to maximize bandwidth conservation
 
 ### Step A: Total Session Isolation & Bandwidth Optimization
 1.  **Browser Destruction**: The previous browser instance is completely killed. No cache, no cookies, no local storage persists.
