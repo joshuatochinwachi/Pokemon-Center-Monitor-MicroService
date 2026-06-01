@@ -65,7 +65,7 @@ HTML_TEMPLATE = """
         .container { display: grid; grid-template-columns: 1fr 350px; gap: 20px; }
         .view-panel { background: #18181B; border-radius: 12px; padding: 15px; border: 1px solid #27272A; position: relative; }
         .log-panel { background: #18181B; border-radius: 12px; padding: 15px; border: 1px solid #27272A; height: 600px; display: flex; flex-direction: column; }
-        #live-stream { width: 100%; border-radius: 8px; border: 1px solid #3F3F46; background: #000; }
+        #live-stream { width: 100%; border-radius: 8px; border: 1px solid #3F3F46; background: #000; cursor: pointer; }
         .logs { flex-grow: 1; overflow-y: auto; font-family: 'Courier New', Courier, monospace; font-size: 12px; color: #A1A1AA; margin-top: 10px; }
         .log-entry { margin-bottom: 4px; border-bottom: 1px solid #27272A; padding-bottom: 2px; }
         .log-time { color: #71717A; margin-right: 8px; }
@@ -106,7 +106,8 @@ HTML_TEMPLATE = """
         const socket = io({transports: ['websocket']});
         const img = document.getElementById('live-stream');
         const logs = document.getElementById('logs');
-        
+        var isDragging = false;
+
         socket.on('screenshot', data => {
             img.src = 'data:image/jpeg;base64,' + data;
         });
@@ -141,6 +142,36 @@ HTML_TEMPLATE = """
                 badge.style.borderColor = '#22C55E';
             }
         });
+
+        function getCoords(e) {
+            var rect = img.getBoundingClientRect();
+            return {
+                x: (e.clientX - rect.left) / rect.width,
+                y: (e.clientY - rect.top) / rect.height
+            };
+        }
+
+        img.onmousedown = function(e) {
+            isDragging = true;
+            var coords = getCoords(e);
+            socket.emit('input', { type: 'mousedown', x: coords.x, y: coords.y });
+        };
+        img.onmousemove = function(e) {
+            if (!isDragging) return;
+            var coords = getCoords(e);
+            socket.emit('input', { type: 'mousemove', x: coords.x, y: coords.y });
+        };
+        img.onmouseup = function(e) {
+            isDragging = false;
+            var coords = getCoords(e);
+            socket.emit('input', { type: 'mouseup', x: coords.x, y: coords.y });
+        };
+        document.addEventListener('keydown', function(e) {
+            if(["ArrowUp","ArrowDown","ArrowLeft","ArrowRight","Space"].indexOf(e.code) > -1) {
+                e.preventDefault();
+            }
+            socket.emit('input', { type: 'keypress', key: e.key });
+        });
     </script>
 </body>
 </html>
@@ -151,6 +182,10 @@ monitor_stats = {"checks": 0, "state": "NORMAL"}
 last_screenshot = None      # Persists last screenshot for new connections
 recent_logs = []            # Persists recent logs for new connections
 MAX_LOG_HISTORY = 50        # Keep last 50 log entries
+
+# --- INPUT QUEUE FOR MANUAL DASHBOARD CONTROL ---
+import queue
+input_queue = queue.Queue()
 
 def log_to_dashboard(message, level="info"):
     global recent_logs
@@ -227,6 +262,10 @@ def handle_connect():
     for log_entry in recent_logs:
         socketio.emit('log_update', log_entry, to=request.sid)
     socketio.emit('stats_update', monitor_stats, to=request.sid)
+
+@socketio.on('input')
+def handle_input(data):
+    input_queue.put(data)
 
 # --- MONITOR CORE ---
 def get_headers(key=None):
@@ -542,6 +581,26 @@ async def simulate_human_behavior(page):
     except Exception:
         pass
 
+async def handle_manual_inputs(page):
+    """Process any manual inputs (clicks, typing) from the dashboard queue"""
+    try:
+        while not input_queue.empty():
+            act = input_queue.get_nowait()
+            vp = page.viewport_size
+            if not vp: continue
+            if act['type'] == 'mousedown':
+                await page.mouse.move(act['x'] * vp['width'], act['y'] * vp['height'])
+                await page.mouse.down()
+            elif act['type'] == 'mousemove':
+                await page.mouse.move(act['x'] * vp['width'], act['y'] * vp['height'])
+            elif act['type'] == 'mouseup':
+                await page.mouse.move(act['x'] * vp['width'], act['y'] * vp['height'])
+                await page.mouse.up()
+            elif act['type'] == 'keypress':
+                await page.keyboard.press(act['key'])
+    except Exception:
+        pass
+
 async def monitor_loop():
     global current_proxy_index
     log_to_dashboard("Elite Monitor Engine Starting...", "info")
@@ -627,9 +686,15 @@ async def monitor_loop():
                     # Stealth Patience: Allow Imperva JS challenges to resolve
                     log_to_dashboard("⏳ Solving Stealth Challenges...", "info")
                     await asyncio.sleep(random.uniform(3.0, 5.0))
+
+                    # Allow manual dashboard interaction during challenge wait
+                    await handle_manual_inputs(page)
                     
                     # Simulate human behavior to defeat behavioral tracking
                     await simulate_human_behavior(page)
+
+                    # Allow manual dashboard interaction after human simulation
+                    await handle_manual_inputs(page)
                     
                     # Smart-Eye: Wait for actual content before screenshotting (Logo or Header)
                     try:
@@ -652,19 +717,34 @@ async def monitor_loop():
                         log_to_dashboard(f"⚠️ IP BLOCKED BY IMPERVA (Attempt {retry_count}/{MAX_RETRIES})", "error")
                         
                         if retry_count >= MAX_RETRIES:
-                            log_to_dashboard(f"🛑 Max retries ({MAX_RETRIES}) reached.", "error")
-                            monitor_stats['_retry_count'] = 0
+                            monitor_stats['_retry_count'] = 0  # Reset for next cycle
+
+                            if not monitor_stats.get("_lockdown_triggered"):
+                                # First time hitting max retries — declare QUEUE_ACTIVE
+                                log_to_dashboard(f"🚨 MAX RETRIES HIT — Imperva full lockdown. Declaring QUEUE_ACTIVE.", "error")
+                                monitor_stats["_lockdown_triggered"] = True
+                                monitor_stats["state"] = "QUEUE_ACTIVE"
+                                await update_supabase_state("QUEUE_ACTIVE", 0.85, {
+                                    "trigger": "imperva_lockdown",
+                                    "note": "Inferred from Imperva full lockdown after 50 consecutive blocks",
+                                    "imperva_lockdown": True
+                                })
+                            else:
+                                # Subsequent cycles — site still locked, queue still live
+                                log_to_dashboard(f"🔁 Still locked after 50 tries. Queue still ACTIVE. Sleeping 60 mins...", "error")
+                                # Keep state as QUEUE_ACTIVE in DB (refresh the timestamp)
+                                await update_supabase_state("QUEUE_ACTIVE", 0.85, {
+                                    "trigger": "imperva_lockdown_persistent",
+                                    "note": "Site still locked. Queue inferred still live.",
+                                    "imperva_lockdown": True
+                                })
+
                             await page.close()
                             await browser.close()
-                            
-                            # Follow the schedule even after a failure
-                            sleep_time, mode = calculate_next_sleep(monitor_stats["state"])
-                            if mode == "QUEUE_WATCH":
-                                log_to_dashboard(f"🚨 Queue Persistence: Next retry in 30 minutes...", "info")
-                            else:
-                                log_to_dashboard(f"😴 Schedule Pause ({mode}). Sleeping for {int(sleep_time/3600)} hours...", "info")
-                            await asyncio.sleep(sleep_time)
-                            break
+
+                            log_to_dashboard(f"👁️ Lockdown Watchdog: Next access attempt in 60 minutes...", "info")
+                            await asyncio.sleep(3600)  # 60 minutes
+                            break  # Break to restart browser with fresh proxy
                         
                         log_to_dashboard("⏳ Applying 15s penalty cooldown for Webshare proxy to rotate properly...", "info")
                         await asyncio.sleep(15)
@@ -694,6 +774,17 @@ async def monitor_loop():
                             is_queue, confidence, signals = await detect_queue(page, network_signals)
                         
                         monitor_stats['_retry_count'] = 0  # Reset retry count on success
+
+                        # --- LOCKDOWN RESOLUTION: Site opened within MAX_RETRIES ---
+                        if monitor_stats.get("_lockdown_triggered"):
+                            log_to_dashboard("✅ Site accessible again — lockdown lifted. Queue returning to NORMAL.", "success")
+                            monitor_stats["_lockdown_triggered"] = False
+                            monitor_stats["state"] = "NORMAL"
+                            await update_supabase_state("NORMAL", 1.0, {
+                                "trigger": "lockdown_resolved",
+                                "note": "Site became accessible within MAX_RETRIES. Queue inferred ended."
+                            })
+
                         new_state = "QUEUE_ACTIVE" if is_queue else "NORMAL"
                         await update_supabase_state(new_state, confidence, signals)
                         monitor_stats["state"] = new_state
