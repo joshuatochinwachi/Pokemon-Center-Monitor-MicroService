@@ -17,7 +17,7 @@ load_dotenv()
 
 # --- CONFIG ---
 PC_URL = "https://www.pokemoncenter.com"
-MAX_RETRIES = 50            # Max proxy rotations before sleeping
+MAX_RETRIES = 75            # Max proxy rotations before sleeping
 
 # Power Hour Config (UTC)
 ACTIVE_START_HOUR = 14  # 2 PM UTC
