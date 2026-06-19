@@ -17,7 +17,7 @@ load_dotenv()
 
 # --- CONFIG ---
 PC_URL = "https://www.pokemoncenter.com"
-MAX_RETRIES = 80            # Max proxy rotations before sleeping
+MAX_RETRIES = 100           # Max proxy rotations before sleeping
 
 # Power Hour Config (UTC)
 ACTIVE_START_HOUR = 14  # 2 PM UTC
@@ -604,231 +604,257 @@ async def handle_manual_inputs(page):
 async def monitor_loop():
     global current_proxy_index
     log_to_dashboard("Elite Monitor Engine Starting...", "info")
+    lockdown_sleep_pending = 0  # Seconds to sleep AFTER closing playwright (avoids zombie context)
     while True:
-        async with async_playwright() as p:
-            launch_args = {
-                "headless": True,
-                "args": [
-                    "--disable-blink-features=AutomationControlled",
-                    "--disable-infobars",
-                    "--no-sandbox",
-                    "--disable-setuid-sandbox",
-                    "--ignore-certificate-errors",
-                    "--disable-dev-shm-usage",
-                    "--disable-gpu",
-                ]
-            }
-            
-            if proxy_pool:
-                current_proxy = proxy_pool[current_proxy_index]
-                launch_args["proxy"] = current_proxy
-                ip_display = current_proxy['server'].split('//')[1].split(':')[0]
-                log_to_dashboard(f"🛡️ Using Proxy Pool IP: {ip_display}", "info")
-            elif os.getenv("PROXY_SERVER"):
-                launch_args["proxy"] = {
-                    "server": os.getenv("PROXY_SERVER"),
-                    "username": os.getenv("PROXY_USERNAME", ""),
-                    "password": os.getenv("PROXY_PASSWORD", "")
-                }
-                log_to_dashboard("🛡️ Single Proxy Configured.", "info")
-                
-            browser = await p.chromium.launch(**launch_args)
-            
-            profile = get_realistic_user_agent()
-            context = await browser.new_context(
-                user_agent=profile["ua"],
-                viewport={'width': random.randint(1280, 1920), 'height': random.randint(800, 1080)},
-                extra_http_headers={
-                    "Accept-Language": "en-US,en;q=0.9",
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-                    "Sec-Ch-Ua": profile["ch_ua"],
-                    "Sec-Ch-Ua-Mobile": "?0", 
-                    "Sec-Ch-Ua-Platform": profile["platform"],
-                    "Upgrade-Insecure-Requests": "1"
-                }
-            )
-            
-            while True:
-                try:
-                    page = await context.new_page()
-                    await stealth_async(page)
-                    network_signals = {'queue_it_detected': False}
-                    page.on("request", lambda r: network_signals.update({'queue_it_detected': True}) if "queue-it.net" in r.url else None)
-
-                    # ⚡ BANDWIDTH SAVER: Block heavy resources (saves up to 80% bandwidth)
-                    # CRITICAL: Always allow queue-it.net through for accurate detection 
-                    BLOCKED_DOMAINS = [
-                        "google-analytics.com", "googletagmanager.com", "doubleclick.net",
-                        "facebook.com", "hotjar.com", "newrelic.com", "quantserve.com",
-                        "scorecardresearch.com", "amazon-adsystem.com", "adnxs.com",
-                        "criteo.com", "segment.com", "mixpanel.com", "amplitude.com"
+        # --- Sleep OUTSIDE playwright context to avoid holding zombie Playwright for 60+ mins ---
+        if lockdown_sleep_pending > 0:
+            log_to_dashboard(f"👁️ Lockdown Watchdog: Sleeping {int(lockdown_sleep_pending/60)} minutes before next attempt...", "info")
+            await asyncio.sleep(lockdown_sleep_pending)
+            lockdown_sleep_pending = 0
+        try:
+            async with async_playwright() as p:
+                launch_args = {
+                    "headless": True,
+                    "args": [
+                        "--disable-blink-features=AutomationControlled",
+                        "--disable-infobars",
+                        "--no-sandbox",
+                        "--disable-setuid-sandbox",
+                        "--ignore-certificate-errors",
+                        "--disable-dev-shm-usage",
+                        "--disable-gpu",
                     ]
-                    async def block_heavy_resources(route, request):
-                        url = request.url.lower()
-                        # ALWAYS let queue-it.net through — needed for detection
-                        if "queue-it.net" in url:
-                            await route.continue_()
-                            return
-                        # Block heavy resource types (NOT stylesheets — blocking CSS triggers ad-blocker detection)
-                        if request.resource_type in ["image", "font", "media"]:
-                            await route.abort()
-                            return
-                        # Block analytics & ad trackers
-                        if any(domain in url for domain in BLOCKED_DOMAINS):
-                            await route.abort()
-                            return
-                        await route.continue_()
-                    await page.route("**/*", block_heavy_resources)
-
-                    log_to_dashboard("⚡ Bandwidth Saver Active. Checking Pokémon Center...")
-                    await page.goto(PC_URL, wait_until="domcontentloaded", timeout=60000)
+                }
+                
+                if proxy_pool:
+                    current_proxy = proxy_pool[current_proxy_index]
+                    launch_args["proxy"] = current_proxy
+                    ip_display = current_proxy['server'].split('//')[1].split(':')[0]
+                    log_to_dashboard(f"🛡️ Using Proxy Pool IP: {ip_display}", "info")
+                elif os.getenv("PROXY_SERVER"):
+                    launch_args["proxy"] = {
+                        "server": os.getenv("PROXY_SERVER"),
+                        "username": os.getenv("PROXY_USERNAME", ""),
+                        "password": os.getenv("PROXY_PASSWORD", "")
+                    }
+                    log_to_dashboard("🛡️ Single Proxy Configured.", "info")
                     
-                    # Stealth Patience: Allow Imperva JS challenges to resolve
-                    log_to_dashboard("⏳ Solving Stealth Challenges...", "info")
-                    await asyncio.sleep(random.uniform(3.0, 5.0))
-
-                    # Allow manual dashboard interaction during challenge wait
-                    await handle_manual_inputs(page)
-                    
-                    # Simulate human behavior to defeat behavioral tracking
-                    await simulate_human_behavior(page)
-
-                    # Allow manual dashboard interaction after human simulation
-                    await handle_manual_inputs(page)
-                    
-                    # Smart-Eye: Wait for actual content before screenshotting (Logo or Header)
+                browser = await p.chromium.launch(**launch_args)
+                
+                profile = get_realistic_user_agent()
+                context = await browser.new_context(
+                    user_agent=profile["ua"],
+                    viewport={'width': random.randint(1280, 1920), 'height': random.randint(800, 1080)},
+                    extra_http_headers={
+                        "Accept-Language": "en-US,en;q=0.9",
+                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                        "Sec-Ch-Ua": profile["ch_ua"],
+                        "Sec-Ch-Ua-Mobile": "?0", 
+                        "Sec-Ch-Ua-Platform": profile["platform"],
+                        "Upgrade-Insecure-Requests": "1"
+                    }
+                )
+                
+                while True:
                     try:
-                        await page.wait_for_selector("header, .main-content, #main-content", timeout=10000)
-                    except:
-                        pass # Site might be in a different state or blocked, capture anyway
-                    
-                    # Take Screenshot for Dashboard
-                    screenshot = await page.screenshot(type='jpeg', quality=50)
-                    base64_screenshot = base64.b64encode(screenshot).decode('utf-8')
-                    global last_screenshot
-                    last_screenshot = base64_screenshot  # Persist for new connections
-                    socketio.emit('screenshot', base64_screenshot)
-                    
-                    is_blocked = await detect_block(page)
-                    
-                    if is_blocked:
-                        retry_count = monitor_stats.get('_retry_count', 0) + 1
-                        monitor_stats['_retry_count'] = retry_count
-                        log_to_dashboard(f"⚠️ IP BLOCKED BY IMPERVA (Attempt {retry_count}/{MAX_RETRIES})", "error")
+                        page = await context.new_page()
+                        await stealth_async(page)
+                        network_signals = {'queue_it_detected': False}
+                        page.on("request", lambda r: network_signals.update({'queue_it_detected': True}) if "queue-it.net" in r.url else None)
+
+                        # ⚡ BANDWIDTH SAVER: Block heavy resources (saves up to 80% bandwidth)
+                        # CRITICAL: Always allow queue-it.net through for accurate detection 
+                        BLOCKED_DOMAINS = [
+                            "google-analytics.com", "googletagmanager.com", "doubleclick.net",
+                            "facebook.com", "hotjar.com", "newrelic.com", "quantserve.com",
+                            "scorecardresearch.com", "amazon-adsystem.com", "adnxs.com",
+                            "criteo.com", "segment.com", "mixpanel.com", "amplitude.com"
+                        ]
+                        async def block_heavy_resources(route, request):
+                            url = request.url.lower()
+                            # ALWAYS let queue-it.net through — needed for detection
+                            if "queue-it.net" in url:
+                                await route.continue_()
+                                return
+                            # Block heavy resource types (NOT stylesheets — blocking CSS triggers ad-blocker detection)
+                            if request.resource_type in ["image", "font", "media"]:
+                                await route.abort()
+                                return
+                            # Block analytics & ad trackers
+                            if any(domain in url for domain in BLOCKED_DOMAINS):
+                                await route.abort()
+                                return
+                            await route.continue_()
+                        await page.route("**/*", block_heavy_resources)
+
+                        log_to_dashboard("⚡ Bandwidth Saver Active. Checking Pokémon Center...")
+                        await page.goto(PC_URL, wait_until="domcontentloaded", timeout=60000)
                         
-                        if retry_count >= MAX_RETRIES:
-                            monitor_stats['_retry_count'] = 0  # Reset for next cycle
+                        # Stealth Patience: Allow Imperva JS challenges to resolve
+                        log_to_dashboard("⏳ Solving Stealth Challenges...", "info")
+                        await asyncio.sleep(random.uniform(3.0, 5.0))
 
-                            if not monitor_stats.get("_lockdown_triggered"):
-                                # First time hitting max retries — declare QUEUE_ACTIVE
-                                log_to_dashboard(f"🚨 MAX RETRIES HIT — Imperva full lockdown. Declaring QUEUE_ACTIVE.", "error")
-                                monitor_stats["_lockdown_triggered"] = True
-                                monitor_stats["state"] = "QUEUE_ACTIVE"
-                                await update_supabase_state("QUEUE_ACTIVE", 0.85, {
-                                    "trigger": "imperva_lockdown",
-                                    "note": "Inferred from Imperva full lockdown after 50 consecutive blocks",
-                                    "imperva_lockdown": True
-                                })
-                            else:
-                                # Subsequent cycles — site still locked, queue still live
-                                log_to_dashboard(f"🔁 Still locked after 50 tries. Queue still ACTIVE. Sleeping 60 mins...", "error")
-                                # Keep state as QUEUE_ACTIVE in DB (refresh the timestamp)
-                                await update_supabase_state("QUEUE_ACTIVE", 0.85, {
-                                    "trigger": "imperva_lockdown_persistent",
-                                    "note": "Site still locked. Queue inferred still live.",
-                                    "imperva_lockdown": True
-                                })
+                        # Allow manual dashboard interaction during challenge wait
+                        await handle_manual_inputs(page)
+                        
+                        # Simulate human behavior to defeat behavioral tracking
+                        await simulate_human_behavior(page)
 
+                        # Allow manual dashboard interaction after human simulation
+                        await handle_manual_inputs(page)
+                        
+                        # Smart-Eye: Wait for actual content before screenshotting (Logo or Header)
+                        try:
+                            await page.wait_for_selector("header, .main-content, #main-content", timeout=10000)
+                        except:
+                            pass # Site might be in a different state or blocked, capture anyway
+                        
+                        # Take Screenshot for Dashboard
+                        screenshot = await page.screenshot(type='jpeg', quality=50)
+                        base64_screenshot = base64.b64encode(screenshot).decode('utf-8')
+                        global last_screenshot
+                        last_screenshot = base64_screenshot  # Persist for new connections
+                        socketio.emit('screenshot', base64_screenshot)
+                        
+                        is_blocked = await detect_block(page)
+                        
+                        if is_blocked:
+                            retry_count = monitor_stats.get('_retry_count', 0) + 1
+                            monitor_stats['_retry_count'] = retry_count
+                            log_to_dashboard(f"⚠️ IP BLOCKED BY IMPERVA (Attempt {retry_count}/{MAX_RETRIES})", "error")
+                            
+                            if retry_count >= MAX_RETRIES:
+                                monitor_stats['_retry_count'] = 0  # Reset for next cycle
+
+                                if not monitor_stats.get("_lockdown_triggered"):
+                                    # First time hitting max retries — declare QUEUE_ACTIVE
+                                    log_to_dashboard(f"🚨 MAX RETRIES HIT — Imperva full lockdown. Declaring QUEUE_ACTIVE.", "error")
+                                    monitor_stats["_lockdown_triggered"] = True
+                                    monitor_stats["state"] = "QUEUE_ACTIVE"
+                                    await update_supabase_state("QUEUE_ACTIVE", 0.85, {
+                                        "trigger": "imperva_lockdown",
+                                        "note": "Inferred from Imperva full lockdown after 50 consecutive blocks",
+                                        "imperva_lockdown": True
+                                    })
+                                else:
+                                    # Subsequent cycles — site still locked, queue still live
+                                    log_to_dashboard(f"🔁 Still locked after 50 tries. Queue still ACTIVE. Sleeping 60 mins...", "error")
+                                    # Keep state as QUEUE_ACTIVE in DB (refresh the timestamp)
+                                    await update_supabase_state("QUEUE_ACTIVE", 0.85, {
+                                        "trigger": "imperva_lockdown_persistent",
+                                        "note": "Site still locked. Queue inferred still live.",
+                                        "imperva_lockdown": True
+                                    })
+
+                                await page.close()
+                                await browser.close()
+
+                                log_to_dashboard(f"👁️ Lockdown Watchdog: Next access attempt in 60 minutes...", "info")
+                                lockdown_sleep_pending = 3600  # Will sleep AFTER exiting playwright context
+                                break  # Break to restart browser with fresh proxy
+                            
+                            log_to_dashboard("⏳ Applying 15s penalty cooldown for Webshare proxy to rotate properly...", "info")
+                            await asyncio.sleep(15)
+                            log_to_dashboard("🔄 Rotating to next proxy in pool...", "info")
+                            if proxy_pool:
+                                current_proxy_index = (current_proxy_index + 1) % len(proxy_pool)
                             await page.close()
                             await browser.close()
-
-                            log_to_dashboard(f"👁️ Lockdown Watchdog: Next access attempt in 60 minutes...", "info")
-                            await asyncio.sleep(3600)  # 60 minutes
-                            break  # Break to restart browser with fresh proxy
-                        
-                        log_to_dashboard("⏳ Applying 15s penalty cooldown for Webshare proxy to rotate properly...", "info")
-                        await asyncio.sleep(15)
-                        log_to_dashboard("🔄 Rotating to next proxy in pool...", "info")
-                        if proxy_pool:
-                            current_proxy_index = (current_proxy_index + 1) % len(proxy_pool)
-                        await page.close()
-                        await browser.close()
-                        break # Break inner loop, launch new browser with new proxy
-                    else:
-                        is_queue, confidence, signals = await detect_queue(page, network_signals)
-                        
-                        # --- DOUBLE-TAP VERIFICATION (NO FALSE ALARMS) ---
-                        if is_queue and confidence < 1.0:
-                            log_to_dashboard("🔍 Heuristic Trigger. Double-checking in 5s...", "info")
-                            await asyncio.sleep(5)
-                            is_queue, confidence, signals = await detect_queue(page, network_signals)
-                            if not is_queue:
-                                log_to_dashboard("🛡️ False Alarm Prevented by Double-Tap Verification.", "success")
-                        
-                        # --- PERSISTENCE CHECK (NEVER MISS A QUEUE) ---
-                        # If we see even a tiny hint (confidence > 0) but it didn't trigger 'is_queue',
-                        # we do one more quick check to ensure the page wasn't just slow-loading.
-                        if not is_queue and confidence > 0:
-                            log_to_dashboard("📡 Minor signal detected. Performing Deep-Scan retry...", "info")
-                            await asyncio.sleep(3)
-                            is_queue, confidence, signals = await detect_queue(page, network_signals)
-                        
-                        monitor_stats['_retry_count'] = 0  # Reset retry count on success
-
-                        # --- LOCKDOWN RESOLUTION: Site opened within MAX_RETRIES ---
-                        if monitor_stats.get("_lockdown_triggered"):
-                            log_to_dashboard("✅ Site accessible again — lockdown lifted. Queue returning to NORMAL.", "success")
-                            monitor_stats["_lockdown_triggered"] = False
-                            monitor_stats["state"] = "NORMAL"
-                            await update_supabase_state("NORMAL", 1.0, {
-                                "trigger": "lockdown_resolved",
-                                "note": "Site became accessible within MAX_RETRIES. Queue inferred ended."
-                            })
-
-                        new_state = "QUEUE_ACTIVE" if is_queue else "NORMAL"
-                        await update_supabase_state(new_state, confidence, signals)
-                        monitor_stats["state"] = new_state
-                        log_to_dashboard(f"Check Complete. Result: {new_state} ({int(confidence*100)}%)", "success" if not is_queue else "error")
-                    
-                        monitor_stats["checks"] += 1
-                        socketio.emit('stats_update', monitor_stats)
-                        
-                        await page.close()
-                        
-                        # Calculate next sleep based on schedule
-                        sleep_time, mode = calculate_next_sleep(new_state)
-                        
-                        if mode == "QUEUE_WATCH":
-                            log_to_dashboard(f"🚨 Queue Persistent Watch: Next check in 30 minutes...", "info")
-                        elif mode == "ACTIVE_SCANNING":
-                            log_to_dashboard(f"💤 Power Hour Active. Next check in {int(sleep_time/60)} minutes...", "info")
+                            break # Break inner loop, launch new browser with new proxy
                         else:
-                            log_to_dashboard(f"😴 Schedule Pause ({mode}). Sleeping for {int(sleep_time/3600)} hours...", "info")
+                            is_queue, confidence, signals = await detect_queue(page, network_signals)
                             
-                        await asyncio.sleep(sleep_time)
+                            # --- DOUBLE-TAP VERIFICATION (NO FALSE ALARMS) ---
+                            if is_queue and confidence < 1.0:
+                                log_to_dashboard("🔍 Heuristic Trigger. Double-checking in 5s...", "info")
+                                await asyncio.sleep(5)
+                                is_queue, confidence, signals = await detect_queue(page, network_signals)
+                                if not is_queue:
+                                    log_to_dashboard("🛡️ False Alarm Prevented by Double-Tap Verification.", "success")
+                            
+                            # --- PERSISTENCE CHECK (NEVER MISS A QUEUE) ---
+                            # If we see even a tiny hint (confidence > 0) but it didn't trigger 'is_queue',
+                            # we do one more quick check to ensure the page wasn't just slow-loading.
+                            if not is_queue and confidence > 0:
+                                log_to_dashboard("📡 Minor signal detected. Performing Deep-Scan retry...", "info")
+                                await asyncio.sleep(3)
+                                is_queue, confidence, signals = await detect_queue(page, network_signals)
+                            
+                            monitor_stats['_retry_count'] = 0  # Reset retry count on success
+
+                            # --- LOCKDOWN RESOLUTION: Site opened within MAX_RETRIES ---
+                            if monitor_stats.get("_lockdown_triggered"):
+                                log_to_dashboard("✅ Site accessible again — lockdown lifted. Queue returning to NORMAL.", "success")
+                                monitor_stats["_lockdown_triggered"] = False
+                                monitor_stats["state"] = "NORMAL"
+                                await update_supabase_state("NORMAL", 1.0, {
+                                    "trigger": "lockdown_resolved",
+                                    "note": "Site became accessible within MAX_RETRIES. Queue inferred ended."
+                                })
+
+                            new_state = "QUEUE_ACTIVE" if is_queue else "NORMAL"
+                            await update_supabase_state(new_state, confidence, signals)
+                            monitor_stats["state"] = new_state
+                            log_to_dashboard(f"Check Complete. Result: {new_state} ({int(confidence*100)}%)", "success" if not is_queue else "error")
                         
-                        # Force complete session isolation
+                            monitor_stats["checks"] += 1
+                            socketio.emit('stats_update', monitor_stats)
+                            
+                            await page.close()
+                            
+                            # Calculate next sleep based on schedule
+                            sleep_time, mode = calculate_next_sleep(new_state)
+                            
+                            if mode == "QUEUE_WATCH":
+                                log_to_dashboard(f"🚨 Queue Persistent Watch: Next check in 30 minutes...", "info")
+                            elif mode == "ACTIVE_SCANNING":
+                                log_to_dashboard(f"💤 Power Hour Active. Next check in {int(sleep_time/60)} minutes...", "info")
+                            else:
+                                log_to_dashboard(f"😴 Schedule Pause ({mode}). Sleeping for {int(sleep_time/3600)} hours...", "info")
+                                
+                            await asyncio.sleep(sleep_time)
+                            
+                            # Force complete session isolation
+                            if proxy_pool:
+                                current_proxy_index = (current_proxy_index + 1) % len(proxy_pool)
+                            await browser.close()
+                            break 
+                        
+                    except Exception as e:
+                        log_to_dashboard(f"Monitor Loop Error: {e}", "error")
+                        # Rotate proxy immediately if the current one caused a crash/error
                         if proxy_pool:
                             current_proxy_index = (current_proxy_index + 1) % len(proxy_pool)
-                        await browser.close()
-                        break 
-                    
-                except Exception as e:
-                    log_to_dashboard(f"Monitor Loop Error: {e}", "error")
-                    # Rotate proxy immediately if the current one caused a crash/error
-                    if proxy_pool:
-                        current_proxy_index = (current_proxy_index + 1) % len(proxy_pool)
-                    try:
-                        if 'page' in locals(): await page.close()
-                        if 'browser' in locals(): await browser.close()
-                    except: pass
-                    await asyncio.sleep(60) # Wait a minute before restarting loop on crash
-                    break
+                        try:
+                            if 'page' in locals(): await page.close()
+                            if 'browser' in locals(): await browser.close()
+                        except: pass
+                        await asyncio.sleep(60) # Wait a minute before restarting loop on crash
+                        break
+        except Exception as e:
+            # --- OUTER SAFETY NET: catches launch failures (OOM, Chromium crash, bad proxy tunnel) ---
+            # Without this, any error during browser launch silently kills the entire monitor.
+            log_to_dashboard(f"🔴 Critical Browser Launch Error (auto-recovering in 60s): {e}", "error")
+            if proxy_pool:
+                current_proxy_index = (current_proxy_index + 1) % len(proxy_pool)
+            await asyncio.sleep(60)
 
 def run_monitor():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(monitor_loop())
+    """Immortal monitor thread entry point. Restarts monitor_loop() if it ever exits or throws."""
+    while True:
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(monitor_loop())
+        except Exception as e:
+            # This should never be reached due to inner guards, but is the final safety net.
+            print(f"[CRITICAL] monitor_loop exited unexpectedly: {e}. Restarting in 30s...")
+            import time as _time
+            _time.sleep(30)
+        finally:
+            try:
+                loop.close()
+            except: pass
 
 if __name__ == "__main__":
     # Start monitor in a background thread
