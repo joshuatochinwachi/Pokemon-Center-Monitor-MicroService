@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.constants import ParseMode
+from telegram.error import BadRequest
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -53,6 +54,25 @@ def is_admin(user_id: int) -> bool:
     if not ADMIN_USER_IDS:
         return True  # If no admin ID specified, allow all commands
     return str(user_id) in ADMIN_USER_IDS
+
+async def safe_edit_text(
+    edit_target: Any, text: str, parse_mode: str = ParseMode.HTML, reply_markup: Any = None
+):
+    """
+    Safely edits Telegram message text, catching 'Message is not modified' errors.
+    """
+    try:
+        if hasattr(edit_target, "edit_text"):
+            await edit_target.edit_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
+        elif callable(edit_target):
+            await edit_target(text, parse_mode=parse_mode, reply_markup=reply_markup)
+    except BadRequest as e:
+        if "Message is not modified" in str(e):
+            pass  # Content hasn't changed, ignore safely
+        else:
+            logger.warning(f"Telegram BadRequest edit error: {e}")
+    except Exception as e:
+        logger.warning(f"Telegram edit error: {e}")
 
 # --- CORE SUPABASE & PUSH NOTIFICATION LOGIC ---
 
@@ -110,6 +130,7 @@ async def fire_push_notifications(
 ) -> int:
     """
     Fires Expo push notifications to all active premium subscribers.
+    Sends individual payloads per token to handle multiple Expo project Experience IDs.
     """
     def log(msg: str):
         logger.info(msg)
@@ -126,7 +147,7 @@ async def fire_push_notifications(
     log(f"📱 Found {len(valid_tokens)} valid tokens across {active_subs} active subscribers.")
     log("🚀 Sending push notifications via Expo API...")
 
-    push_payload = [
+    push_payloads = [
         {
             "to": t,
             "title": "🚨 Pokémon Center Monitor",
@@ -139,20 +160,37 @@ async def fire_push_notifications(
         for t in valid_tokens
     ]
 
-    try:
-        async with httpx.AsyncClient(timeout=20.0) as client:
+    async def send_single_push(client: httpx.AsyncClient, payload: dict) -> int:
+        try:
             resp = await client.post(
                 "https://exp.host/--/api/v2/push/send",
                 headers={"Accept": "application/json", "Content-Type": "application/json"},
-                json=push_payload,
+                json=payload,
             )
-
             if resp.status_code == 200:
-                log(f"✅ Success! Sent {len(push_payload)} Expo push notifications.")
-                return len(push_payload)
+                res_data = resp.json()
+                data_list = res_data.get("data") or []
+                if data_list and isinstance(data_list, list) and data_list[0].get("status") == "ok":
+                    return 1
+                elif data_list and isinstance(data_list, list) and data_list[0].get("status") == "error":
+                    logger.warning(f"Expo push ticket error for token {payload.get('to')}: {data_list[0].get('message')}")
+                    return 0
+                return 1
             else:
-                log(f"❌ Expo API Error: {resp.status_code} - {resp.text}")
+                logger.error(f"Expo API Error ({resp.status_code}): {resp.text}")
                 return 0
+        except Exception as ex:
+            logger.error(f"Push send exception for token {payload.get('to')}: {ex}")
+            return 0
+
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            tasks = [send_single_push(client, p) for p in push_payloads]
+            results = await asyncio.gather(*tasks)
+            successful_count = sum(results)
+
+            log(f"✅ Success! Sent {successful_count}/{len(valid_tokens)} Expo push notifications.")
+            return successful_count
     except Exception as e:
         log(f"❌ Push Network Error: {e}")
         return 0
@@ -265,9 +303,9 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("⏳ Fetching live monitor status...")
-    await send_status_report(msg.edit_text)
+    await send_status_report(msg)
 
-async def send_status_report(edit_func: Callable):
+async def send_status_report(edit_target: Any):
     state_data = await fetch_supabase_state()
     valid_tokens, active_subs, total_rows = await fetch_active_subscribers_and_tokens()
 
@@ -296,11 +334,7 @@ async def send_status_report(edit_func: Callable):
         f"━━━━━━━━━━━━━━━━━━━━━━"
     )
 
-    await edit_func(
-        report_text,
-        parse_mode=ParseMode.HTML,
-        reply_markup=get_control_keyboard()
-    )
+    await safe_edit_text(edit_target, report_text, parse_mode=ParseMode.HTML, reply_markup=get_control_keyboard())
 
 async def cmd_live(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -311,12 +345,9 @@ async def cmd_live(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("⏳ <b>[INITIATING]</b> Triggering QUEUE_ACTIVE state...", parse_mode=ParseMode.HTML)
     logs = ["<b>🔴 EXECUTING /live COMMAND:</b>\n"]
 
-    async def update_log(line: str):
+    def update_log(line: str):
         logs.append(line)
-        try:
-            await msg.edit_text("\n".join(logs), parse_mode=ParseMode.HTML)
-        except Exception:
-            pass
+        asyncio.create_task(safe_edit_text(msg, "\n".join(logs), parse_mode=ParseMode.HTML))
 
     success = await update_supabase_state("QUEUE_ACTIVE", log_cb=update_log)
     if success:
@@ -324,14 +355,7 @@ async def cmd_live(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         logs.append("\n❌ <b>FAILED: Could not complete queue live trigger.</b>")
 
-    try:
-        await msg.edit_text(
-            "\n".join(logs),
-            parse_mode=ParseMode.HTML,
-            reply_markup=get_control_keyboard()
-        )
-    except Exception:
-        pass
+    await safe_edit_text(msg, "\n".join(logs), parse_mode=ParseMode.HTML, reply_markup=get_control_keyboard())
 
 async def cmd_normal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -342,12 +366,9 @@ async def cmd_normal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("⏳ <b>[INITIATING]</b> Resetting state to NORMAL...", parse_mode=ParseMode.HTML)
     logs = ["<b>🟢 EXECUTING /normal COMMAND:</b>\n"]
 
-    async def update_log(line: str):
+    def update_log(line: str):
         logs.append(line)
-        try:
-            await msg.edit_text("\n".join(logs), parse_mode=ParseMode.HTML)
-        except Exception:
-            pass
+        asyncio.create_task(safe_edit_text(msg, "\n".join(logs), parse_mode=ParseMode.HTML))
 
     success = await update_supabase_state("NORMAL", log_cb=update_log)
     if success:
@@ -355,14 +376,7 @@ async def cmd_normal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         logs.append("\n❌ <b>FAILED: Could not update Supabase state.</b>")
 
-    try:
-        await msg.edit_text(
-            "\n".join(logs),
-            parse_mode=ParseMode.HTML,
-            reply_markup=get_control_keyboard()
-        )
-    except Exception:
-        pass
+    await safe_edit_text(msg, "\n".join(logs), parse_mode=ParseMode.HTML, reply_markup=get_control_keyboard())
 
 async def cmd_push(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -373,24 +387,14 @@ async def cmd_push(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("⏳ <b>[INITIATING]</b> Triggering push alert dispatch...", parse_mode=ParseMode.HTML)
     logs = ["<b>🔔 EXECUTING /push COMMAND:</b>\n"]
 
-    async def update_log(line: str):
+    def update_log(line: str):
         logs.append(line)
-        try:
-            await msg.edit_text("\n".join(logs), parse_mode=ParseMode.HTML)
-        except Exception:
-            pass
+        asyncio.create_task(safe_edit_text(msg, "\n".join(logs), parse_mode=ParseMode.HTML))
 
     count = await fire_push_notifications("QUEUE_ACTIVE", log_cb=update_log)
     logs.append(f"\n✅ <b>FINISHED: Sent {count} push notifications.</b>")
 
-    try:
-        await msg.edit_text(
-            "\n".join(logs),
-            parse_mode=ParseMode.HTML,
-            reply_markup=get_control_keyboard()
-        )
-    except Exception:
-        pass
+    await safe_edit_text(msg, "\n".join(logs), parse_mode=ParseMode.HTML, reply_markup=get_control_keyboard())
 
 async def cmd_subscribers(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("⏳ Querying subscriber database...")
@@ -404,11 +408,7 @@ async def cmd_subscribers(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• Total DB Records Inspected: <b>{total_rows}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━"
     )
-    await msg.edit_text(
-        sub_text,
-        parse_mode=ParseMode.HTML,
-        reply_markup=get_control_keyboard()
-    )
+    await safe_edit_text(msg, sub_text, parse_mode=ParseMode.HTML, reply_markup=get_control_keyboard())
 
 # --- CALLBACK QUERY HANDLER FOR BUTTONS ---
 
@@ -419,7 +419,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     user_id = query.from_user.id
 
     if data == "cb_status":
-        await send_status_report(query.edit_message_text)
+        await send_status_report(query.message)
 
     elif data == "cb_subscribers":
         valid_tokens, active_subs, total_rows = await fetch_active_subscribers_and_tokens()
@@ -431,11 +431,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             f"• Total DB Records Inspected: <b>{total_rows}</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━"
         )
-        await query.edit_message_text(
-            sub_text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=get_control_keyboard()
-        )
+        await safe_edit_text(query.message, sub_text, parse_mode=ParseMode.HTML, reply_markup=get_control_keyboard())
 
     elif data in ["cb_set_live", "cb_set_normal", "cb_test_push"]:
         if not is_admin(user_id):
@@ -444,14 +440,11 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
         if data == "cb_set_live":
             logs = ["<b>🔴 EXECUTING QUEUE LIVE TRIGGER:</b>\n"]
-            await query.edit_message_text("\n".join(logs), parse_mode=ParseMode.HTML)
+            await safe_edit_text(query.message, "\n".join(logs), parse_mode=ParseMode.HTML)
 
-            async def update_log(line: str):
+            def update_log(line: str):
                 logs.append(line)
-                try:
-                    await query.edit_message_text("\n".join(logs), parse_mode=ParseMode.HTML)
-                except Exception:
-                    pass
+                asyncio.create_task(safe_edit_text(query.message, "\n".join(logs), parse_mode=ParseMode.HTML))
 
             success = await update_supabase_state("QUEUE_ACTIVE", log_cb=update_log)
             if success:
@@ -459,22 +452,15 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             else:
                 logs.append("\n❌ <b>FAILED: Could not set state.</b>")
 
-            await query.edit_message_text(
-                "\n".join(logs),
-                parse_mode=ParseMode.HTML,
-                reply_markup=get_control_keyboard()
-            )
+            await safe_edit_text(query.message, "\n".join(logs), parse_mode=ParseMode.HTML, reply_markup=get_control_keyboard())
 
         elif data == "cb_set_normal":
             logs = ["<b>🟢 EXECUTING SITE NORMAL TRIGGER:</b>\n"]
-            await query.edit_message_text("\n".join(logs), parse_mode=ParseMode.HTML)
+            await safe_edit_text(query.message, "\n".join(logs), parse_mode=ParseMode.HTML)
 
-            async def update_log(line: str):
+            def update_log(line: str):
                 logs.append(line)
-                try:
-                    await query.edit_message_text("\n".join(logs), parse_mode=ParseMode.HTML)
-                except Exception:
-                    pass
+                asyncio.create_task(safe_edit_text(query.message, "\n".join(logs), parse_mode=ParseMode.HTML))
 
             success = await update_supabase_state("NORMAL", log_cb=update_log)
             if success:
@@ -482,31 +468,20 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             else:
                 logs.append("\n❌ <b>FAILED: Could not set state.</b>")
 
-            await query.edit_message_text(
-                "\n".join(logs),
-                parse_mode=ParseMode.HTML,
-                reply_markup=get_control_keyboard()
-            )
+            await safe_edit_text(query.message, "\n".join(logs), parse_mode=ParseMode.HTML, reply_markup=get_control_keyboard())
 
         elif data == "cb_test_push":
             logs = ["<b>🔔 EXECUTING PUSH NOTIFICATION TEST:</b>\n"]
-            await query.edit_message_text("\n".join(logs), parse_mode=ParseMode.HTML)
+            await safe_edit_text(query.message, "\n".join(logs), parse_mode=ParseMode.HTML)
 
-            async def update_log(line: str):
+            def update_log(line: str):
                 logs.append(line)
-                try:
-                    await query.edit_message_text("\n".join(logs), parse_mode=ParseMode.HTML)
-                except Exception:
-                    pass
+                asyncio.create_task(safe_edit_text(query.message, "\n".join(logs), parse_mode=ParseMode.HTML))
 
             count = await fire_push_notifications("QUEUE_ACTIVE", log_cb=update_log)
             logs.append(f"\n✅ <b>FINISHED: Sent {count} push notifications.</b>")
 
-            await query.edit_message_text(
-                "\n".join(logs),
-                parse_mode=ParseMode.HTML,
-                reply_markup=get_control_keyboard()
-            )
+            await safe_edit_text(query.message, "\n".join(logs), parse_mode=ParseMode.HTML, reply_markup=get_control_keyboard())
 
 # --- POST INITIALIZATION ---
 
