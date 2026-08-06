@@ -6,3 +6,4 @@ flask==3.0.2
 flask-socketio==5.3.6
 eventlet==0.35.1
 greenlet==3.0.3
+python-telegram-bot>=20.0

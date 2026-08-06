@@ -13,5 +13,5 @@ COPY . .
 # Ensure playwright is installed (though it should be in the base image)
 RUN playwright install chromium
 
-# Run the monitor
-CMD ["python", "pokemon_monitor.py"]
+# Run the manual Telegram monitor bot
+CMD ["python", "telegram_bot.py"]
